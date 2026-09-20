@@ -19,3 +19,6 @@ out_pipeline*/
 *.a
 sw/coremark/
 sw/embench-iot/
+*.bak
+*.bak_*
+*.patched
