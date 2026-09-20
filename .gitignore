@@ -17,3 +17,5 @@ out_pipeline*/
 *.log
 *.o
 *.a
+sw/coremark/
+sw/embench-iot/
