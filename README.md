@@ -1,239 +1,237 @@
-<div align="center">
+# RISC-V Fusion/Isolation Pipeline
 
-<img src="https://readme-typing-svg.demolab.com/?font=Fira+Code&size=24&pause=1200&color=22D3EE&center=true&vCenter=true&width=640&lines=K.+Siva+Srinivas;Embedded+Systems+%2B+DSP+Engineer;Building+Secure+Mesh+Networks;2+IEEE+Papers+In+Flight" alt="Typing SVG" />
+A 5-stage in-order RV32IM pipeline in SystemVerilog, extended with two
+hardware research features layered on top of a standard IF→ID→EX→MEM→WB
+core: **macro-op fusion** of common compiler-generated instruction idioms,
+and a **hardware isolation-gating scheme** for the multiply/divide unit.
+Built to answer one question: *does fusing instruction pairs, isolating the
+idle muldiv unit, or combining both, actually save power — and at what
+cost?*
 
-<br/>
+Verified via cycle-accurate lockstep against a Spike golden model, benchmarked
+on Dhrystone / CoreMark / Embench-IoT, and PPA-characterized on an Artix-7
+target (Vivado synthesis, SAIF-based power, post-route timing).
 
-<a href="mailto:sivasrinivasccvv@email.com"><img src="https://img.shields.io/badge/Email-22D3EE?style=flat-square&logo=gmail&logoColor=0D1117" /></a>
-<a href="https://linkedin.com/in/REPLACE_ME"><img src="https://img.shields.io/badge/LinkedIn-22D3EE?style=flat-square&logo=linkedin&logoColor=0D1117" /></a>
-<a href="https://github.com/krss-94"><img src="https://img.shields.io/badge/GitHub-22D3EE?style=flat-square&logo=github&logoColor=0D1117" /></a>
+> Earlier notes/commit history in this repo refer to this as an "ooo" (out-of-order)
+> project. It is not out-of-order — no ROB, no reservation stations, no
+> out-of-order issue/retirement. It's an in-order 5-stage pipeline with
+> instruction fusion and isolation gating. The naming is legacy and left
+> uncorrected in old paths/module names for history's sake.
 
-</div>
+---
 
-<br/>
+## Research question and answer
+
+**Question:** does instruction fusion, muldiv isolation, or the combination
+of both, reduce power — and what does each cost?
+
+**Answer, backed by post-synthesis measurement (see [Results](#results) below):**
+
+- **Fusion is the dominant power and timing cost.** ~16-24% power overhead
+  over baseline, and post-route critical-path slack drops from +2.2/+2.7ns
+  (non-fusion configs) to +0.46/+0.52ns (fusion-enabled configs) at the same
+  clock target — a real, measured ~2ns critical-path cost, not an estimate.
+- **Isolation-domain scope is nearly free.** Power delta between isolation-scope
+  configs is within ±6% and inconsistent in direction (sometimes negative),
+  and combining isolation with fusion adds no measurable power or timing cost
+  beyond fusion alone.
+- **Conclusion:** fusion, not isolation, is the microarchitectural feature
+  that actually costs something. Isolation gating can be added for its
+  security/measurement-boundary properties essentially for free.
+
+---
+
+## Highlights
+
+- **5 fusion idioms** — pattern-matches instruction pairs commonly emitted by
+  real compiler output (e.g. compare+branch, load+use, ADD/ADDI+LW
+  zero-offset) and fuses them into a single pipeline slot
+- **`pend2` dual-writeback mechanism** — lets a fused pair commit two register
+  writes without adding a second write port to the register file, by
+  deferring the second write through EX→MEM→WB over the following cycles
+- **Isolation gating** (`isol_gate.sv`) — a hardware-enforced execution
+  boundary around the muldiv unit, with its own HPM counters
+  (`fusion_active_cnt`, `isol_active`) for measurement
+- **Verified correct**: 92/92 cycle-accurate lockstep tests against Spike,
+  plus 15/15 standalone invariant checks, clean across **all 5 ablation
+  configs** (baseline / fusion-only / isolation-only / proposed /
+  isolation-scope-ablation)
+- **Benchmarked**: Dhrystone, CoreMark, and the full ~19-program Embench-IoT
+  suite all run correct and complete on the real RTL, across all 5 configs
+- **PPA-characterized**: full SAIF power sweep (5 configs × 4 benchmarks) and
+  post-route timing closure (5 configs, all passing) on Artix-7
+  (`xc7a100tcsg324-1`)
+- **Every anomaly explained, not hand-waved**: two real correctness bugs
+  found and fixed with evidence (not guessed), and one performance anomaly
+  root-caused to a specific structural tradeoff rather than left as "weird
+  behavior we didn't look into" — see [Bugs Found & Fixed](#bugs-found--fixed)
+
+---
+
+## Repo layout
 
 ```
-$ whoami
-> Second-year ECE engineer. Embedded systems + DSP.
-> Currently building distributed sensor meshes and multirate audio pipelines.
+rtl/          RTL sources (14 SystemVerilog files, ~1000 lines total)
+              core_top_pipelined.sv is the top module
+sim/          Verilator testbenches + build script
+harness/      Spike lockstep verification harness, test generators
+sw/           Test programs (directed .s, randomized .s/.c) + benchmark suite
+              (Dhrystone, CoreMark, Embench-IoT ports)
+docs/         Design notes, microarchitecture spec
+compliance/   RISC-V compliance test binaries
+vivado_saif/  Vivado xsim testbench + Tcl scripts for SAIF power capture
+RESULTS.md    Full PPA (power + timing) and benchmark data tables
 ```
 
-<br/>
+## Build & run
 
-## `01` — SYSTEM_OVERVIEW
+```bash
+# Build one ablation config (FUSION_EN ISOL_EN BR_CMP_EN <name>)
+./sim/build_pipeline.sh 1 1 0 sim_pipeline_D_proposed
 
-Electronics & Communication Engineering student at Sathyabama Institute of Science and Technology, working on signal processing and embedded systems that hold up under real constraints — noisy channels, limited compute, field deployment. Two IEEE papers in the pipeline. Currently shipping a secure multi-node ESP-NOW mesh cluster.
-
-<br/>
-
-## `02` — RESEARCH_LOG
-
-<table width="100%">
-<tr>
-<td width="50%" valign="top">
-
-**PAIRS**
-<br/>
-<sub>Phase Artifact Reduction Using Interpolation and Re-Sampling</sub>
-
-Multirate phase vocoder pitch-shifting algorithm reducing transient pre-echo artifacts vs. standard phase vocoder baselines. MATLAB → C, ported to TMS320C6748.
-
-<img src="https://img.shields.io/badge/IEEE-Under%20Review-22D3EE?style=flat-square&labelColor=161B22"/>
-
-[`→ repo`](https://github.com/krss-94/PAIRS-Phase-Artifact-Reduction-Using-Interpolation-And-Resampling)
-
-</td>
-<td width="50%" valign="top">
-
-**RPW Sentinel**
-<br/>
-<sub>Acoustic Red Palm Weevil Detection System</sub>
-
-5-stage TKEO-based acoustic detection pipeline on ESP32 with adaptive thresholding and LoRa multi-node communication. Optimized to ₹252/tree.
-
-<img src="https://img.shields.io/badge/IEEE-In%20Progress-22D3EE?style=flat-square&labelColor=161B22"/>
-
-[`→ repo`](https://github.com/krss-94/Red-Palm-Weevil-Detection-Using-Acoustic-Sensing)
-
-</td>
-</tr>
-</table>
-
-<br/>
-
-## `03` — ACTIVE_DEPLOYMENT
-
-```
-STATUS    : ACTIVE
-PROJECT   : AQ_Mesh — Secure Distributed Air Quality Monitoring Cluster
-STACK     : ESP32 · ESP8266 · ESP-NOW · C++
+# Run the Spike lockstep + standalone verification harness
+SIM=./sim_pipeline_D_proposed bash harness/run_lockstep_pipeline.sh
+SIM=./sim_pipeline_D_proposed bash harness/standalone_checks.sh
 ```
 
-Multi-node mesh network with distinct sensor, relay, and coordinator firmware roles. Packet validation and multi-hop relay forwarding maintain data integrity across the cluster without a central access point.
+**Ablation configs:**
 
-[`→ repo`](https://github.com/krss-94/AQ_Mesh)
+| Config | Fusion | Isolation | Branch-cmp scope |
+|---|---|---|---|
+| `A_baseline` | off | off | — |
+| `B_fusion_only` | on | off | — |
+| `C_isol_only` | off | on | — |
+| `D_proposed` | on | on | narrow |
+| `D_isol_scope_ablation` | on | on | wide |
 
-<br/>
+---
 
-## `04` — PROJECT_REGISTRY
+## Architecture
 
-<table width="100%">
-<tr>
-<td width="50%" valign="top">
-
-**ZeroTrust-IoT-Auth**
-
-Zero-trust HMAC-SHA256 authentication framework for ESP32 industrial IoT mesh networks. Challenge-response protocol, replay prevention, per-packet integrity, attack simulation tooling.
-
-`Python` · `MIT License`
-
-[`→ repo`](https://github.com/krss-94/ZeroTrust-IoT-Auth)
-
-</td>
-<td width="50%" valign="top">
-
-**HIL-Servo-Control-Testbed**
-
-Hardware-in-the-loop control systems testbed using ESP32 and Arduino for real-time evaluation of On/Off, P, PI, and PID controllers across multiple plant models with fault injection.
-
-`Python` · `MIT License`
-
-[`→ repo`](https://github.com/krss-94/HIL-Servo-Control-Testbed)
-
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
-
-**Automated Street Light Monitoring & Energy Saving System**
-
-ESP32-based IoT system for adaptive street lighting, energy monitoring, fault detection, and Blynk cloud dashboards.
-
-`Python` · `MIT License`
-
-[`→ repo`](https://github.com/krss-94/-Automated-Street-Light-Monitoring-And-Energy-Saving-System)
-
-</td>
-<td width="50%" valign="top">
-
-**Smart Waste Segregation & Recycling System**
-
-AI-powered waste classification combining ESP32-CAM image classification, sensor fusion, and servo-based sorting with IoT dashboard monitoring.
-
-`Python` · `MIT License`
-
-[`→ repo`](https://github.com/krss-94/Smart-Waste-Segregation-And-Recycling-System)
-
-</td>
-</tr>
-</table>
-
-<br/>
-
-## `05` — STACK
-
-<div align="center">
-
-<img src="https://skillicons.dev/icons?i=c,cpp,python,arduino,raspberrypi,git,github&theme=dark" />
-
-<br/><br/>
-
-<img src="https://img.shields.io/badge/MATLAB-22D3EE?style=flat-square&logo=mathworks&logoColor=0D1117"/>
-<img src="https://img.shields.io/badge/ESP32-22D3EE?style=flat-square&logo=espressif&logoColor=0D1117"/>
-<img src="https://img.shields.io/badge/ESP--NOW-22D3EE?style=flat-square&logoColor=0D1117"/>
-<img src="https://img.shields.io/badge/LoRa-22D3EE?style=flat-square&logoColor=0D1117"/>
-<img src="https://img.shields.io/badge/TMS320C6748-22D3EE?style=flat-square&logoColor=0D1117"/>
-
-</div>
-
-<br/>
-
-## `06` — METRICS
-
-<table width="100%">
-<tr>
-<td width="55%" valign="top">
-
-<img src="https://github-readme-stats.vercel.app/api?username=krss-94&show_icons=true&theme=tokyonight&bg_color=0D1117&title_color=22D3EE&icon_color=22D3EE&text_color=c9d1d9&hide_border=true&include_all_commits=true" width="100%"/>
-
-</td>
-<td width="45%" valign="top">
-
-<img src="https://github-readme-stats.vercel.app/api/top-langs/?username=krss-94&layout=compact&theme=tokyonight&bg_color=0D1117&title_color=22D3EE&text_color=c9d1d9&hide_border=true" width="100%"/>
-
-</td>
-</tr>
-</table>
-
-<div align="center">
-<img src="https://streak-stats.demolab.com/?user=krss-94&theme=tokyonight&background=0D1117&ring=22D3EE&fire=22D3EE&currStreakLabel=22D3EE&hide_border=true" />
-</div>
-
-<br/>
-
-## `07` — CONTRIBUTION_GRAPH
-
-<div align="center">
-<sub>Animated contribution graph renders here once the one-time setup below is run.</sub>
-</div>
-
-<details>
-<summary><code>setup: enable the animated contribution graph</code></summary>
-
-<br/>
-
-<div align="center">
-<img src="https://raw.githubusercontent.com/krss-94/krss-94/output/snake.svg" alt="contribution snake" />
-</div>
-
-<br/>
-
-This animation needs one GitHub Action in this repo (`krss-94/krss-94`). Create `.github/workflows/snake.yml`:
-
-```yaml
-name: snake
-on:
-  schedule:
-    - cron: "0 0 * * *"
-  workflow_dispatch: {}
-  push:
-    branches: [ main ]
-
-permissions:
-  contents: write
-
-jobs:
-  generate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: Platane/snk@v3
-        with:
-          github_user_name: krss-94
-          outputs: dist/snake.svg
-      - uses: crazy-max/ghaction-github-pages@v4
-        with:
-          target_branch: output
-          build_dir: dist
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+        IF          ID          EX          MEM         WB
+     +-------+   +-------+   +-------+   +-------+   +-------+
+PC-->| fetch |-->| decode|-->|  ALU  |-->|  dmem |-->|  RF   |
+     |       |   | fuse  |   | muldiv|   | isol  |   | write |
+     +-------+   +-------+   +-------+   +-------+   +-------+
+         ^  if_id      id_ex      ex_mem     mem_wb      |
+         |__reg________reg________reg________reg_________|
+              stall/forward/clear on every stage boundary
 ```
 
-Push it, let the action run once, and the image above will populate.
+- Standard 5-stage in-order pipeline with hazard/forward/stall logic in
+  `hazard_unit.sv` and a single unified 128KB data/instruction memory
+  region.
+- Fusion detection happens in decode (`decoder.sv`); a fused pair occupies
+  one pipeline slot for its first half and defers its second register write
+  through `pend2_active`/`pend2_fire_valid` state machine logic in
+  `core_top_pipelined.sv`, draining EX→MEM→WB over the following cycles.
+- Isolation gating (`isol_gate.sv`) sits around the muldiv unit
+  (`muldiv.sv`/`muldiv_iter.sv`), enforcing a hardware execution boundary and
+  exposing `isol_active`/`fusion_active_cnt` via CSR-mapped HPM counters
+  (`csr_file.sv`).
 
-</details>
+---
 
-<br/>
+## Verification
 
-## `08` — CONNECT
+Cycle-accurate lockstep against a Spike (riscv-isa-sim) golden model, plus a
+standalone invariant-checking suite, run identically across all 5 ablation
+configs:
 
-<div align="center">
+| Suite | Result |
+|---|---|
+| Lockstep (directed + control-flow + randomized) | **92/92 PASS** |
+| Standalone invariant checks | **15/15 PASS** |
+| HPM self-check (fusion/isolation counters vs RTL, 3000+ cycles) | **0 mismatches** |
 
-<a href="mailto:sivasrinivasccvv@email.com"><img src="https://img.shields.io/badge/-Email-22D3EE?style=for-the-badge&logo=gmail&logoColor=0D1117"/></a>
-<a href="https://linkedin.com/in/REPLACE_ME"><img src="https://img.shields.io/badge/-LinkedIn-22D3EE?style=for-the-badge&logo=linkedin&logoColor=0D1117"/></a>
-<a href="https://github.com/krss-94"><img src="https://img.shields.io/badge/-GitHub-22D3EE?style=for-the-badge&logo=github&logoColor=0D1117"/></a>
+Every config — `A_baseline`, `B_fusion_only`, `C_isol_only`, `D_proposed`,
+`D_isol_scope_ablation` — passes both suites cleanly.
 
-<br/><br/>
+## Benchmarks
 
-<sub><code>&gt; connection established_</code></sub>
+All benchmarks run to completion with correct output on the real RTL
+(`sim_pipeline_*`), across all 5 configs. Representative single-run figures:
 
-</div>
+| Benchmark | Result |
+|---|---|
+| Dhrystone (500 runs) | 707 Dhrystones/sec, ~0.40 DMIPS/MHz |
+| CoreMark (20 iterations) | ~1.43 CoreMark/MHz, all 4 CRCs matched |
+| Embench-IoT (19 programs) | all `correct=1` across all 5 configs |
+
+Full per-benchmark, per-config cycle counts are in
+[`RESULTS.md`](RESULTS.md).
+
+## Results
+
+Full data (power matrix, post-route timing, per-benchmark cycle deltas) is
+in [`RESULTS.md`](RESULTS.md). Summary:
+
+**Power** (SAIF-based, post-synthesis, relative estimates — see caveat in
+RESULTS.md): fusion adds **~16-24%** over baseline across all 4 benchmarks
+tested; isolation-scope alone moves power by **less than 6%**, inconsistently
+signed.
+
+**Timing** (post-route, Artix-7, 18ns clock): all 5 configs meet timing with
+0 failing endpoints. Non-fusion configs (`A_baseline`, `C_isol_only`) carry
++2.2 to +2.7ns of slack; fusion-enabled configs (`B_fusion_only`,
+`D_proposed`, `D_isol_scope_ablation`) sit much closer to the edge at
++0.46 to +0.52ns — fusion is the real critical-path driver.
+
+## Bugs found & fixed
+
+Two real correctness bugs, found via lockstep mismatch and traced to root
+cause with cycle-level signal tracing rather than guessed at:
+
+1. **Idiom5 commit-suppression bug** — `core_top_pipelined.sv`'s `if_id_reg`
+   `.clear()` OR-chain suppressed the first half of a fused pair for idioms
+   1-4, but idiom5 was never added to that list. Its ADD/ADDI half kept
+   committing separately (with a corrupted value) *in addition to* the
+   correct deferred `pend2` write — one spurious extra commit per idiom5
+   activation. On the `ud` benchmark this produced 44,646 extra commits
+   versus baseline. Root-caused by counting phantom commits against the
+   `pend2`-drain trace, confirmed by exact count match, fixed by adding
+   `fuse_idiom5` to the clear condition. Verified zero regression across all
+   5 configs after the fix.
+
+2. **Isolation control policy bug** — `muldiv_op_en` was wired to `!isol_en`
+   (a flag toggled only by the `FISOL.BOUND`/`FISOL.OFF` diagnostic
+   instructions), but those instructions are architecturally specified as a
+   no-op measurement-window marker, never a functional gate. Any multiply
+   issued during a `FISOL.BOUND` region got the wrong result. Fixed by
+   rewiring to the existing EX-local busy latch (`muldiv_active`), the
+   actually-correct functional gate per spec. The old test's expected values
+   had wrongly codified the buggy behavior as correct — rewritten to check
+   invariants (multiply results stay correct regardless of FISOL state)
+   instead of pinning stale numbers.
+
+## Known structural tradeoff (documented, not a bug)
+
+Any pend2-based fusion (idioms 3, 5) incurs a flat front-end freeze
+(`pend2_stall`, typically 4 cycles) any time a new instruction is ready
+while a deferred write is still draining through the shared WB port —
+**regardless of whether that instruction actually depends on the pending
+register.** This was initially suspected to be a flush-interaction bug, then
+a simple RAW hazard; cycle-level tracing showed it's neither — it's a
+structural consequence of serializing the deferred write through a single
+WB port with no arbitration logic for independent instructions to pass it.
+
+This is why the `ud` benchmark pays this cost heavily (its loop reuses the
+fused register almost every iteration) while `huffbench`/`slre` mostly don't
+(their fusion instances don't hit the reuse window as often). Adding real
+WB-port arbitration to let independent instructions bypass a draining pend2
+write would eliminate this cost, but was deliberately left unoptimized as
+out-of-scope engineering work rather than an under-pressure bugfix. Disclosed
+here rather than silently absorbed into the fusion overhead numbers above.
+
+## Status
+
+- RTL, verification, benchmarking, and PPA characterization: **complete**
+  across all 5 ablation configs.
+- Open for future work: WB-port arbitration to remove the `pend2_stall`
+  structural cost; multi-seed place-and-route variance check on the power
+  numbers specifically (current numbers are single-run per config).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
