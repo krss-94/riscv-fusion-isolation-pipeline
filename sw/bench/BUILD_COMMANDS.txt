@@ -1,0 +1,12 @@
+# tarfind.elf — working build (confirmed clean halt, mcause=0)
+riscv32-unknown-elf-gcc -march=rv32im_zicsr -mabi=ilp32 -O2 -ffreestanding -fno-builtin \
+  -DLOCAL_SCALE_FACTOR=5 -DGLOBAL_SCALE_FACTOR=1 \
+  -I ~/ooo/sw/bench/include -I ~/ooo/sw/embench-iot/support \
+  -I ~/ooo/sw/embench-iot/src/tarfind -I ~/ooo/sw/bench/embench_port -I ~/ooo/sw/bench \
+  ~/ooo/sw/embench-iot/src/tarfind/tarfind.c \
+  ~/ooo/sw/embench-iot/support/beebsc.c \
+  ~/ooo/sw/bench/embench_port/main_wrapper.c \
+  ~/ooo/sw/bench/embench_port/board_support.c \
+  ~/ooo/sw/bench/crt0.s ~/ooo/sw/bench/syscalls_uart.c \
+  ~/ooo/sw/bench/miniprintf.c ~/ooo/sw/bench/ministring.c \
+  -T ~/ooo/sw/bench/link_bench.ld -nostartfiles -nostdlib -o sw/bench/tarfind.elf

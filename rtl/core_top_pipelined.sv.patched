@@ -1,0 +1,913 @@
+module core_top_pipelined #(
+    parameter MEM_BASE  = 32'h8000_0000,
+    parameter MEM_BYTES = 32'h0002_0000,
+    parameter bit FUSION_EN  = 1'b1,
+    parameter bit ISOL_EN    = 1'b1,
+    /* verilator lint_off UNUSEDPARAM */
+    parameter bit BR_CMP_EN  = 1'b0
+    /* verilator lint_on UNUSEDPARAM */
+) (
+    input  logic clk,
+    input  logic rst_n,
+
+    output logic [31:0] dbg_wb_pc,
+    output logic [31:0] dbg_wb_instr,
+    output logic        dbg_wb_reg_we,
+    output logic [4:0]  dbg_wb_reg_addr,
+    output logic [31:0] dbg_wb_reg_wdata,
+
+    /* Idiom-3 deferred (pend2) write commit -- fires one cycle after the
+     * fused instruction's own WB write, through the same regfile port
+     * (see wb_rd_addr_for_rf mux). Without a separate commit line for
+     * this, AUIPC's surviving rd write is invisible to the lockstep
+     * trace even though it's architecturally correct -- spike_normalize
+     * .py's final-value-wins comparison handles a second commit line
+     * for the same register safely, no special-casing needed there. */
+    output logic        dbg_pend2_fire,
+    output logic [4:0]  dbg_pend2_addr,
+    output logic [31:0] dbg_pend2_data,
+
+    output logic [31:0] dbg_mem_pc,
+    output logic [31:0] dbg_mem_instr,
+    output logic        dbg_mem_we,
+    output logic [31:0] dbg_mem_addr,
+    output logic [31:0] dbg_mem_wdata,
+    output logic [1:0]  dbg_mem_width,
+
+    output logic        dbg_trap_taken,
+    output logic [31:0] dbg_mepc,
+    output logic [31:0] dbg_mcause,
+    output logic [31:0] dbg_mtval
+);
+    localparam int MEM_WORDS = MEM_BYTES/4;
+    /* Harvard split, port-budget fix: a single BRAM primitive has only
+     * 2 ports. The old unified mem[] needed 4 (2 IMEM reads + 1 DMEM
+     * read + 1 DMEM write) so Vivado silently fell back to LUTRAM,
+     * which overflows the device (see place_design DRC UTLZ-1 errors).
+     * Split into imem[] (2 read ports, no HDL write -> pure ROM/RAM,
+     * loaded externally at boot) and dmem[] (1 read + 1 write -> true
+     * dual-port RAM). Both are mirror-loaded with the same initial
+     * image at boot (same address space, same contents) so plain data
+     * loads/stores against the .data/.bss region still work; this
+     * assumes no self-modifying code, true of every test program in
+     * this project's suite and already implicit in the pipelined
+     * design (icache-style stability assumed by hazard/forwarding
+     * logic). A runtime store to a code address now updates dmem[]
+     * only and is NOT visible to instruction fetch -- a real behavior
+     * change from the old unified array, acceptable under that
+     * assumption but worth flagging explicitly. */
+    /* imem has no HDL write path by design (pure ROM/RAM, mirror-
+     * loaded via backdoor DPI poke from tb_pipeline.cpp at boot,
+     * see __PVT__imem write there); Verilator cannot see that
+     * external driver, so it flags the array UNDRIVEN. Waived. */
+    /* verilator lint_off UNDRIVEN */
+    (* ram_style = "block" *) logic [31:0] imem [0:MEM_WORDS-1];
+`ifndef VERILATOR
+    initial $readmemh("imem_init.hex", imem);
+`endif
+    /* verilator lint_on UNDRIVEN */
+    (* ram_style = "block" *) logic [31:0] dmem [0:MEM_WORDS-1];
+`ifndef VERILATOR
+    initial $readmemh("imem_init.hex", dmem);
+`endif
+
+    logic [31:0] pc, pc_next;
+    wire  [31:0] imem_off      = pc - MEM_BASE;
+    wire  [31:0] imem_off_next = (pc + 32'd4) - MEM_BASE;
+
+    /* BRAM-inference fix: reads must be registered, not combinational.
+     * Adds one IF pipeline register (pc_d / if_instr_r) between the PC
+     * register and if_id_reg. Cleared on flush_id (pc_redirect) same as
+     * if_id_reg, so a mispredict drains through both registers -- 1
+     * extra bubble cycle vs the old design, not a correctness change.
+     * if_instr_next_r is Part 8 SS2.1's one-instruction lookahead for
+     * the decode-stage fusion detector ("this instruction" vs "the
+     * next" in the same cycle boundary); PC is always word-aligned
+     * (RV32IM, no C-ext) so a plain word index is exact. */
+    logic [31:0] pc_d, if_instr_r, if_instr_next_r;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n || flush_id) begin
+            pc_d <= MEM_BASE; if_instr_r <= 32'h00000013; if_instr_next_r <= 32'h00000013;
+        end else if (!stall_pc_ifid) begin
+            pc_d <= pc;
+            if_instr_r      <= imem[imem_off[16:2]];
+            if_instr_next_r <= imem[imem_off_next[16:2]];
+        end
+    end
+
+    logic [31:0] id_pc, id_instr, id_instr_next;
+    logic        id_lookahead_valid;
+    logic        stall_pc_ifid, flush_id;
+
+    /* Forward declarations for xvlog: fuse_idiom1-5, mem_rd_addr, and
+     * mem_mem_read are used earlier in the file (if_id_reg's .clear(),
+     * hazard_unit's .mem_rd_addr_raw()/.mem_mem_read()) than they're
+     * driven below. muldiv_active is deliberately left at its original
+     * declaration site -- hoisting it broke Verilator's handling of
+     * stall_idex (see history), so it stays put; xvlog's elaboration
+     * only needs these three fixed. */
+    logic        fuse_idiom1, fuse_idiom2, fuse_idiom3, fuse_idiom4, fuse_idiom5;
+    logic [4:0]  mem_rd_addr;
+    logic        mem_mem_read;
+
+    /* fuse_idiom1 bubble: by the time fusion is detected (from ID-stage
+     * id_instr/id_instr_next), pc has already advanced past the LUI and
+     * is now fetching the ADDI itself. Without this, that ADDI flows into
+     * ID next cycle and re-executes on top of the already-fused result --
+     * a double-apply bug, not a pc-skip problem, so pc_next needs no
+     * special case (see above): just clear/bubble this cycle's fetch. */
+    /* fuse_idiom1's clear must NOT fire while stall_pc_ifid is already
+     * asserted for an unrelated reason (e.g. a muldiv-busy global freeze).
+     * if_id_reg's own convention is clear-always-wins-over-stall (see this
+     * module's header comment) -- without the !stall_pc_ifid guard, a
+     * fusable LUI+ADDI pair sitting in ID gets wiped to a bubble on the
+     * very first cycle of any freeze that happens to catch it there, even
+     * though the freeze itself was meant to hold ID's contents untouched.
+     * Once wiped, PC (which IS legitimately frozen that whole time) never
+     * moved, so IF re-fetches the orphaned ADDI standalone once the freeze
+     * ends and it executes against stale rs1 instead of the fused LUI
+     * result -- found via a failing lockstep run (rand_10: x1 computed as
+     * old_x1+imm12 instead of the fused constant), traced to a mul
+     * immediately preceding a li idiom, not caught at design time. */
+    if_id_reg u_if_id (
+        .clk(clk), .rst_n(rst_n), .stall(stall_pc_ifid),
+        .clear(flush_id || ((fuse_idiom1 || fuse_idiom2 || fuse_idiom3 || fuse_idiom4 || fuse_idiom5) && !stall_pc_ifid)),
+        .pc_in(pc_d), .instr_in(if_instr_r), .instr_next_in(if_instr_next_r),
+        .lookahead_valid_in(!flush_id),
+        .pc_out(id_pc), .instr_out(id_instr), .instr_next_out(id_instr_next),
+        .lookahead_valid_out(id_lookahead_valid)
+    );
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) pc <= MEM_BASE;
+        else if (pc_redirect || !stall_pc_ifid) pc <= pc_next;
+    end
+
+    logic [4:0]  id_rs1_addr, id_rs2_addr, id_rd_addr;
+    logic [31:0] id_rs1_data, id_rs2_data, id_imm;
+    logic        id_reg_write, id_mem_read, id_mem_write, id_mem_unsigned;
+    logic [1:0]  id_mem_width, id_result_src;
+    logic [3:0]  id_alu_op;
+    logic        id_alu_src_a_pc, id_alu_src_b_imm;
+    logic        id_is_muldiv, id_is_branch, id_is_jal, id_is_jalr;
+    logic        id_is_fisol_bound, id_is_fisol_off, id_illegal_instr;
+    logic [2:0]  id_muldiv_op;
+    logic        id_is_csr;
+    logic [1:0]  id_csr_op;
+    logic [11:0] id_csr_addr;
+
+    assign id_rs1_addr = id_instr[19:15];
+    assign id_rs2_addr = id_instr[24:20];
+    assign id_rd_addr  = id_instr[11:7];
+
+    decoder u_decoder (
+        .instr(id_instr), .reg_write(id_reg_write), .mem_read(id_mem_read), .mem_write(id_mem_write),
+        .mem_width(id_mem_width), .mem_unsigned(id_mem_unsigned), .alu_op(id_alu_op),
+        .alu_src_a_pc(id_alu_src_a_pc), .alu_src_b_imm(id_alu_src_b_imm), .result_src(id_result_src),
+        .is_muldiv(id_is_muldiv), .muldiv_op(id_muldiv_op),
+        .is_branch(id_is_branch), .is_jal(id_is_jal), .is_jalr(id_is_jalr),
+        .is_fisol_bound(id_is_fisol_bound), .is_fisol_off(id_is_fisol_off), .illegal_instr(id_illegal_instr),
+        .is_csr(id_is_csr), .csr_op(id_csr_op), .csr_addr(id_csr_addr)
+    );
+    imm_gen u_imm_gen (.instr(id_instr), .imm(id_imm));
+
+    /* ---- Fusion detector: idiom 1 only (LUI+ADDI), Part 8 SS2.2 idiom 1.
+     * Idioms 2-5 are explicit follow-up work -- fail-safe default
+     * (decline to fuse) covers every other pattern, including partial
+     * idiom-1 matches. References ex_reg_write/ex_rd_addr (declared
+     * below from id_ex_reg's outputs) and mem_reg_write_fwd/mem_rd_addr_fwd,
+     * wb_reg_write_fwd/wb_rd_addr_fwd (declared further below, same
+     * forwarding-alias signals hazard_unit already consumes) -- forward
+     * reference is fine in SystemVerilog and matches this file's existing
+     * style (e.g. mem_alu_result_fwd is used before its driving logic). */
+    wire [6:0] id_opcode      = id_instr[6:0];
+    wire [2:0] id_funct3      = id_instr[14:12];
+    wire [6:0] id_next_opcode = id_instr_next[6:0];
+    wire [2:0] id_next_funct3 = id_instr_next[14:12];
+    wire [4:0] id_branch_rs2  = id_instr_next[24:20]; /* idiom 4: BEQ/BNE's rs2 field */
+    wire [4:0] id_lui_rd      = id_instr[11:7];
+    wire [4:0] id_addi_rd     = id_instr_next[11:7];
+    wire [4:0] id_addi_rs1    = id_instr_next[19:15];
+    wire [4:0] id_auipc_rd    = id_instr[11:7]; /* idiom 2: same bit field as id_lui_rd */
+
+    wire idiom1_pattern_match = id_lookahead_valid
+        && (id_opcode == 7'b0110111)                 /* LUI */
+        && (id_next_opcode == 7'b0010011)             /* OP-IMM */
+        && (id_next_funct3 == 3'b000)                 /* ADDI */
+        && (id_lui_rd != 5'd0)
+        && (id_addi_rd == id_lui_rd)
+        && (id_addi_rs1 == id_lui_rd);
+
+    /* Idiom 2 (Part 8 SS2.2): AUIPC rd,imm20 + ADDI rd,rd,imm12 ->
+     * single-cycle PC-relative address. Reuses fusion_result_imm as-is:
+     * AUIPC already sets alu_src_a_pc=1 in the decoder, so overriding
+     * id_imm_final to (imm20+imm12) makes the existing ALU add compute
+     * pc+imm20+imm12 in one cycle -- no separate PC add needed here. */
+    wire idiom2_pattern_match = id_lookahead_valid
+        && (id_opcode == 7'b0010111)                 /* AUIPC */
+        && (id_next_opcode == 7'b0010011)             /* OP-IMM */
+        && (id_next_funct3 == 3'b000)                 /* ADDI */
+        && (id_auipc_rd != 5'd0)
+        && (id_addi_rd == id_auipc_rd)
+        && (id_addi_rs1 == id_auipc_rd);
+
+    /* Idiom 3 (Part 8 SS2.2): AUIPC rd,imm20 + JALR ra,rd,imm12 ->
+     * single-cycle far call/jump. Unlike idioms 1/2's same-rd chains,
+     * JALR's rs1 (base) and rd ("ra") are generally DIFFERENT registers
+     * -- pattern keys off id_addi_rs1 (JALR's rs1, same I-type field
+     * ADDI's rs1 occupies) == id_auipc_rd, NOT id_addi_rd == id_auipc_rd.
+     * The two-destination-register consequence (AUIPC's rd write can't
+     * be dropped) is handled by the pend2_* deferred-writeback
+     * mechanism below, not by this match condition. */
+    wire idiom3_pattern_match = id_lookahead_valid
+        && (id_opcode == 7'b0010111)                 /* AUIPC */
+        && (id_next_opcode == 7'b1100111)             /* JALR */
+        && (id_next_funct3 == 3'b000)                 /* JALR requires funct3=000 */
+        && (id_auipc_rd != 5'd0)
+        && (id_addi_rs1 == id_auipc_rd);
+
+    /* Idiom 4 (Part 8 SS2.2): SLT{,U,I} rd,rs1,rs2 + BEQ/BNE rd,x0,off ->
+     * fused compare+branch. rs1==id_rd_addr reuses id_addi_rs1 (same
+     * I/B-type bit-19:15 field idioms 2/3 already alias) since BEQ/BNE's
+     * rs1 sits in the identical position. rs2 must be x0 per the exact
+     * idiom pattern -- this is NOT a general branch-on-any-compare fusion. */
+    wire idiom4_pattern_match = id_lookahead_valid
+        && (((id_opcode == 7'b0110011) && (id_funct3 == 3'b010 || id_funct3 == 3'b011))   /* SLT, SLTU */
+            || ((id_opcode == 7'b0010011) && (id_funct3 == 3'b010 || id_funct3 == 3'b011))) /* SLTI, SLTIU */
+        && (id_next_opcode == 7'b1100011)                 /* BRANCH */
+        && (id_next_funct3 == 3'b000 || id_next_funct3 == 3'b001) /* BEQ, BNE */
+        && (id_addi_rs1 == id_rd_addr)
+        && (id_branch_rs2 == 5'd0);
+
+    /* Hazard-safety interlock (SS2.2 condition iii, conservative subset
+     * for idiom 1): decline to fuse if any in-flight instruction will
+     * still write the same rd -- fusing would make WAW ordering
+     * ambiguous. Condition (ii), no FISOL.BOUND decoded between them, is
+     * automatically satisfied for this idiom: nothing can be "between"
+     * two back-to-back lookahead instructions. */
+    wire idiom1_hazard_clear = !(ex_reg_write  && ex_rd_addr  == id_lui_rd) &&
+                               !(mem_reg_write_fwd && mem_rd_addr_fwd == id_lui_rd) &&
+                               !(wb_reg_write_fwd  && wb_rd_addr_fwd  == id_lui_rd);
+
+    wire idiom2_hazard_clear = !(ex_reg_write  && ex_rd_addr  == id_auipc_rd) &&
+                               !(mem_reg_write_fwd && mem_rd_addr_fwd == id_auipc_rd) &&
+                               !(wb_reg_write_fwd  && wb_rd_addr_fwd  == id_auipc_rd);
+
+    /* Same formula as idiom2_hazard_clear (both key off id_auipc_rd) --
+     * idiom 3 needs AUIPC's rd clear of in-flight writers too, same
+     * WAW-ordering reason. */
+    wire idiom3_hazard_clear = !(ex_reg_write  && ex_rd_addr  == id_auipc_rd) &&
+                               !(mem_reg_write_fwd && mem_rd_addr_fwd == id_auipc_rd) &&
+                               !(wb_reg_write_fwd  && wb_rd_addr_fwd  == id_auipc_rd);
+
+    /* Idiom 4 needs no WAW/RAW check beyond FISOL.BOUND/lookahead-validity
+     * (handled separately below): unlike idioms 1-3, fusion never
+     * overrides the compare instruction's own id_ex_reg fields -- it
+     * still executes and writes rd exactly as an unfused SLT would (Part
+     * 8's correctness note: the write is never dropped, only the
+     * branch's redundant register-file re-read of that value is
+     * eliminated, sourced instead from ex_alu_result the same cycle it's
+     * produced). Nothing is combined/reordered, so no new hazard class
+     * is introduced; the compare's own hazards (e.g. a load-use freeze on
+     * its rs1/rs2) are handled by the existing fusion-independent stall
+     * logic exactly as if unfused. */
+    wire idiom4_hazard_clear = 1'b1;
+
+    /* FISOL.BOUND fusion-suppression gate (fixes 4.2 regression: fuse_idiom1
+     * previously had no BOUND-state input at all). Latched at ID-stage
+     * commit (!stall_pc_ifid), one cycle earlier than isol_en (which
+     * latches at WB) -- fusion is decided combinationally in ID, so a
+     * WB-latched signal would lag 3 stages too far behind to gate it. */
+    logic id_bound_active;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) id_bound_active <= 1'b0;
+        else if (!stall_pc_ifid) begin
+            if (id_is_fisol_bound) id_bound_active <= 1'b1;
+            else if (id_is_fisol_off) id_bound_active <= 1'b0;
+        end
+    end
+    assign fuse_idiom1 = FUSION_EN && idiom1_pattern_match && idiom1_hazard_clear && !id_bound_active;
+    assign fuse_idiom2 = FUSION_EN && idiom2_pattern_match && idiom2_hazard_clear && !id_bound_active;
+    assign fuse_idiom3 = FUSION_EN && idiom3_pattern_match && idiom3_hazard_clear && !id_bound_active;
+    assign fuse_idiom4 = FUSION_EN && idiom4_pattern_match && idiom4_hazard_clear && !id_bound_active;
+    assign fuse_idiom5 = FUSION_EN && idiom5_pattern_match && idiom5_hazard_clear && !id_bound_active;
+
+    /* Idiom 5 (Part 8 SS2.2): ADD/ADDI rd,rs1,rs2/imm + LW rd2,0(rd) ->
+     * single-cycle address-compute+load. LW's own offset must be exactly
+     * zero: the fused op computes ONE address (ADD's rs1+rs2/imm) and
+     * uses it directly as the load address; this ALU has no second adder
+     * input for a further LW-side offset. Nonzero-offset LW following
+     * ADD fails the pattern match and decodes unfused -- same fail-safe-
+     * to-baseline principle already used to exclude ADD+SW (no 3rd
+     * regfile read port, per spec table SS2's "no change" constraint).
+     * Two destinations: ADD's rd (address) is deferred via pend2_* (same
+     * mechanism as idiom3), LW's rd (loaded value) is the pair's PRIMARY
+     * write and rides the existing, unmodified load->WB path. The
+     * deferred pend2 value below is the address, computed identically to
+     * what the EX ALU will independently compute from the same operands
+     * -- NOT the load result, which is a separate, later value entirely. */
+    wire [6:0] id_funct7 = id_instr[31:25];
+    wire [31:0] id_imm_next = {{20{id_instr_next[31]}}, id_instr_next[31:20]};
+
+    wire idiom5_pattern_match = id_lookahead_valid
+        && (((id_opcode == 7'b0110011) && (id_funct3 == 3'b000) && (id_funct7 == 7'b0000000))  /* ADD */
+            || ((id_opcode == 7'b0010011) && (id_funct3 == 3'b000)))                             /* ADDI */
+        && (id_next_opcode == 7'b0000011)             /* LOAD */
+        && (id_next_funct3 == 3'b010)                 /* LW only */
+        && (id_rd_addr != 5'd0)
+        && (id_addi_rs1 == id_rd_addr)                /* LW's rs1 == ADD's rd */
+        && (id_imm_next == 32'd0);                    /* LW offset must be 0 */
+
+    /* Hazard check keys off the ID-stage READ operands (id_rs1_addr, and
+     * id_rs2_addr for R-type ADD), NOT id_rd_addr -- fusion_add_result
+     * below reads id_rs1_data/id_rs2_data combinationally at ID with no
+     * forwarding, unlike idiom3's fused_jalr_base which only ever reads
+     * id_pc (never a register), so idiom3's same-style check against
+     * id_rd_addr was correct there but wrong here. */
+    wire idiom5_hazard_clear = !(ex_reg_write      && ex_rd_addr      == id_rs1_addr) &&
+                               !(mem_reg_write_fwd && mem_rd_addr_fwd == id_rs1_addr) &&
+                               !(wb_reg_write_fwd  && wb_rd_addr_fwd  == id_rs1_addr) &&
+                               !((id_opcode == 7'b0110011) &&
+                                 (   (ex_reg_write      && ex_rd_addr      == id_rs2_addr)
+                                  || (mem_reg_write_fwd && mem_rd_addr_fwd == id_rs2_addr)
+                                  || (wb_reg_write_fwd  && wb_rd_addr_fwd  == id_rs2_addr)));
+
+    wire [31:0] fusion_add_result = (id_opcode == 7'b0110011) ? (id_rs1_data + id_rs2_data)
+                                                                : (id_rs1_data + id_imm);
+
+    /* Fused constant = LUI's imm20 (already left-shifted) + ADDI's
+     * sign-extended imm12. Recomputed directly here since both
+     * immediates are needed simultaneously this cycle, unlike id_imm
+     * which only ever holds one instruction's immediate at a time. */
+    wire [31:0] fusion_imm20 = {id_instr[31:12], 12'b0};
+    wire [31:0] fusion_imm12 = {{20{id_instr_next[31]}}, id_instr_next[31:20]};
+    wire [31:0] fusion_result_imm = fusion_imm20 + fusion_imm12;
+    wire any_fuse_imm = fuse_idiom1 || fuse_idiom2;
+    wire [31:0] id_imm_final = any_fuse_imm ? fusion_result_imm : id_imm;
+
+    /* Pulses exactly once per real fusion event, never once per stall
+     * cycle -- same level-vs-pulse care as the muldiv_active_cnt bug
+     * fixed in Handoff #7 (id_ex_reg only actually latches this decode
+     * once !stall_idex). */
+    /* Part 10 §4.6 fix: fuse_idiom1 is decided from id_lookahead_valid,
+     * which is REGISTERED from when the LUI/ADDI pair was originally
+     * fetched -- it can't see a same-cycle redirect (branch/JAL/JALR/
+     * trap) resolving in EX right now. id_ex_reg gets flushed via
+     * flush_ex regardless, so the fused value itself never reaches
+     * architectural state -- but fusion_active didn't check flush_ex,
+     * so it could still spuriously pulse mhpmcounter5 for a pair that
+     * gets squashed this very cycle. Forward reference to flush_ex
+     * (declared below) is fine in SystemVerilog, same as elsewhere in
+     * this file. */
+    wire fusion_active /*verilator public*/ = (fuse_idiom1 || fuse_idiom2 || fuse_idiom3 || fuse_idiom4 || fuse_idiom5) && !stall_idex && !flush_ex;
+
+    /* Idiom 3 has TWO live destination registers (AUIPC's rd, JALR's
+     * ra) -- pend2_* threads a deferred second write (AUIPC's value)
+     * through EX->MEM->WB alongside the fused instruction's own (JALR's)
+     * write, which fires through the WB port normally. One cycle later,
+     * front-end is held (pend2_active -> hazard_unit.pend2_stall) and
+     * ID/EX gets bubbles (same flush_ex mechanism as load_use_hazard),
+     * draining EX/MEM/WB normally underneath, until the deferred write
+     * fires through the now-idle WB port (pend2_fire_valid). */
+    logic        ex_pend2_valid, mem_pend2_valid, wb_pend2_valid;
+    logic [4:0]  ex_pend2_addr, mem_pend2_addr, wb_pend2_addr;
+    logic [31:0] ex_pend2_data, mem_pend2_data, wb_pend2_data;
+    logic        ex_fuse4_valid, ex_fuse4_bne;
+    logic [31:0] ex_fuse4_target;
+    wire  [31:0] fused_jalr_base = id_pc + fusion_imm20;
+
+    /* Idiom 4 fused branch target: the (bubbled) BEQ/BNE's own PC is
+     * id_pc+4, same "next instruction's PC" convention idiom 3 uses for
+     * its fused JALR. B-type immediate assembled directly from
+     * id_instr_next's bit fields, mirroring imm_gen's BRANCH case exactly
+     * (imm_gen itself only ever decodes id_instr, the compare, so its
+     * output can't be reused here). */
+    wire [31:0] fusion_branch_imm =
+        {{19{id_instr_next[31]}}, id_instr_next[31], id_instr_next[7],
+         id_instr_next[30:25], id_instr_next[11:8], 1'b0};
+    wire [31:0] fusion_branch_target = (id_pc + 32'd4) + fusion_branch_imm;
+    wire fuse4_is_bne = id_next_funct3[0]; /* 000=BEQ->0, 001=BNE->1 */
+
+    /* Same class of bug already noted on fusion_active above: latching
+     * pend2_active on fuse_idiom3/5 alone, without checking flush_ex,
+     * commits to expecting a future pend2_fire_valid even when THIS
+     * cycle's flush_ex squashes the very id_ex_reg write that would carry
+     * pend2_valid_in forward. Unlike fusion_active's case (a miscounted
+     * stat), this one is fatal: pend2_active latches permanently high
+     * with no pend2_fire_valid ever able to follow, so pend2_stall ->
+     * stall_pc_ifid holds forever -- total front-end deadlock. Guard
+     * identically: decline to enter the pend2-wait state for a fusion
+     * that's being squashed this same cycle. */
+    logic        pend2_active;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) pend2_active <= 1'b0;
+        else if ((fuse_idiom3 || fuse_idiom5) && !stall_pc_ifid && !flush_ex) pend2_active <= 1'b1;
+        else if (pend2_fire_valid) pend2_active <= 1'b0;
+    end
+
+    logic        pend2_fire_valid;
+    logic [4:0]  pend2_fire_addr;
+    logic [31:0] pend2_fire_data;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) pend2_fire_valid <= 1'b0;
+        else if (!stall_memwb) begin
+            pend2_fire_valid <= wb_pend2_valid;
+            pend2_fire_addr  <= wb_pend2_addr;
+            pend2_fire_data  <= wb_pend2_data;
+        end
+    end
+
+    logic [4:0]  wb_rd_addr_for_rf;
+    logic        wb_reg_write_for_rf;
+    logic [31:0] wb_rd_data_for_rf;
+
+    regfile_pipelined u_regfile (
+        .clk(clk), .rs1_addr(id_rs1_addr), .rs2_addr(id_rs2_addr),
+        .rs1_data(id_rs1_data), .rs2_data(id_rs2_data),
+        .rd_we(wb_reg_write_for_rf), .rd_addr(wb_rd_addr_for_rf), .rd_data(wb_rd_data_for_rf)
+    );
+
+    logic [31:0] ex_pc, ex_rs1_data, ex_rs2_data, ex_imm, ex_instr;
+    logic [4:0]  ex_rs1_addr, ex_rs2_addr, ex_rd_addr;
+    logic        ex_reg_write, ex_mem_read, ex_mem_write, ex_mem_unsigned;
+    logic [1:0]  ex_mem_width, ex_result_src;
+    logic [3:0]  ex_alu_op;
+    logic        ex_alu_src_a_pc, ex_alu_src_b_imm;
+    logic        ex_is_muldiv, ex_is_branch, ex_is_jal, ex_is_jalr;
+    logic [2:0]  ex_muldiv_op;
+    logic        ex_illegal_instr;
+    logic        ex_is_csr;
+    logic [1:0]  ex_csr_op;
+    logic [11:0] ex_csr_addr;
+    logic        ex_is_fisol_bound, ex_is_fisol_off;
+    logic        stall_idex, flush_ex;
+
+    id_ex_reg u_id_ex (
+        .clk(clk), .rst_n(rst_n), .stall(stall_idex), .clear(flush_ex),
+        /* Idiom 3 overrides: this decode slot (physically AUIPC's) is
+         * repurposed to carry the fused JALR's control/data; the real
+         * JALR is bubbled via the if_id_reg clear above (idioms 1/2's
+         * mechanism). pc_in becomes id_pc+4 (JALR's own PC) so pc_plus4
+         * downstream is JALR's own PC+4 (the correct link value).
+         * rs1_addr_in overrides to id_auipc_rd purely so hazard_unit's
+         * fwd_a_sel keys off the right register -- idiom3_hazard_clear
+         * guarantees nothing in-flight targets id_auipc_rd, so fwd_a_sel
+         * resolves to "no forward" and fwd_a_val passes fused_jalr_base
+         * through untouched into redirect_target = fwd_a_val + ex_imm. */
+        .pc_in(fuse_idiom3 ? (id_pc + 32'd4) : id_pc),
+        .rs1_data_in(fuse_idiom3 ? fused_jalr_base : id_rs1_data),
+        .rs2_data_in(id_rs2_data),
+        .imm_in(fuse_idiom3 ? fusion_imm12 : id_imm_final),
+        .rs1_addr_in(fuse_idiom3 ? id_auipc_rd : id_rs1_addr), .rs2_addr_in(id_rs2_addr),
+        .rd_addr_in((fuse_idiom3 || fuse_idiom5) ? id_addi_rd : id_rd_addr),
+        .instr_in(id_instr),
+        .reg_write_in(fuse_idiom3 ? 1'b1 : id_reg_write),
+        .mem_read_in(fuse_idiom5 ? 1'b1 : id_mem_read), .mem_write_in(id_mem_write),
+        .mem_width_in(fuse_idiom5 ? 2'b10 : id_mem_width),
+        .result_src_in(fuse_idiom3 ? 2'b10 : fuse_idiom5 ? 2'b01 : id_result_src), .mem_unsigned_in(id_mem_unsigned),
+        .alu_op_in(id_alu_op), .alu_src_a_pc_in(id_alu_src_a_pc), .alu_src_b_imm_in(id_alu_src_b_imm),
+        .is_muldiv_in(id_is_muldiv), .is_branch_in(id_is_branch), .is_jal_in(id_is_jal),
+        .is_jalr_in(fuse_idiom3 ? 1'b1 : id_is_jalr),
+        .muldiv_op_in(id_muldiv_op), .illegal_instr_in(id_illegal_instr), .is_csr_in(id_is_csr),
+        .csr_op_in(id_csr_op), .csr_addr_in(id_csr_addr),
+        .is_fisol_bound_in(id_is_fisol_bound), .is_fisol_off_in(id_is_fisol_off),
+        .pend2_valid_in(fuse_idiom3 || fuse_idiom5),
+        .pend2_addr_in(fuse_idiom3 ? id_auipc_rd : id_rd_addr),
+        .pend2_data_in(fuse_idiom3 ? fused_jalr_base : fusion_add_result),
+        .fuse4_valid_in(fuse_idiom4), .fuse4_bne_in(fuse4_is_bne), .fuse4_target_in(fusion_branch_target),
+
+        .pc_out(ex_pc), .rs1_data_out(ex_rs1_data), .rs2_data_out(ex_rs2_data), .imm_out(ex_imm),
+        .rs1_addr_out(ex_rs1_addr), .rs2_addr_out(ex_rs2_addr), .rd_addr_out(ex_rd_addr),
+        .instr_out(ex_instr),
+        .reg_write_out(ex_reg_write), .mem_read_out(ex_mem_read), .mem_write_out(ex_mem_write),
+        .mem_width_out(ex_mem_width), .result_src_out(ex_result_src), .mem_unsigned_out(ex_mem_unsigned),
+        .alu_op_out(ex_alu_op), .alu_src_a_pc_out(ex_alu_src_a_pc), .alu_src_b_imm_out(ex_alu_src_b_imm),
+        .is_muldiv_out(ex_is_muldiv), .is_branch_out(ex_is_branch), .is_jal_out(ex_is_jal), .is_jalr_out(ex_is_jalr),
+        .muldiv_op_out(ex_muldiv_op), .illegal_instr_out(ex_illegal_instr), .is_csr_out(ex_is_csr),
+        .csr_op_out(ex_csr_op), .csr_addr_out(ex_csr_addr),
+        .is_fisol_bound_out(ex_is_fisol_bound), .is_fisol_off_out(ex_is_fisol_off),
+        .pend2_valid_out(ex_pend2_valid), .pend2_addr_out(ex_pend2_addr), .pend2_data_out(ex_pend2_data),
+        .fuse4_valid_out(ex_fuse4_valid), .fuse4_bne_out(ex_fuse4_bne), .fuse4_target_out(ex_fuse4_target)
+    );
+
+    logic [4:0]  mem_rd_addr_fwd;
+    logic        mem_reg_write_fwd;
+    logic [4:0]  wb_rd_addr_fwd;
+    logic        wb_reg_write_fwd;
+    logic [1:0]  fwd_a_sel, fwd_b_sel;
+    logic        muldiv_busy, muldiv_done;
+    logic [31:0] muldiv_result_bus;
+    logic        pc_redirect;
+    logic        stall_exmem, stall_memwb;
+
+    hazard_unit u_hazard (
+        .ex_rs1_addr(ex_rs1_addr), .ex_rs2_addr(ex_rs2_addr),
+        .mem_rd_addr(mem_rd_addr_fwd), .mem_reg_write(mem_reg_write_fwd),
+        .wb_rd_addr(wb_rd_addr_fwd), .wb_reg_write(wb_reg_write_fwd),
+        .id_rs1_addr(id_rs1_addr), .id_rs2_addr(id_rs2_addr),
+        .ex_rd_addr(ex_rd_addr), .ex_mem_read(ex_mem_read),
+        .mem_rd_addr_raw(mem_rd_addr), .mem_mem_read(mem_mem_read),
+        .pc_redirect(pc_redirect),
+        .muldiv_busy(muldiv_active),
+        .pend2_stall(pend2_active),
+        .fwd_a_sel(fwd_a_sel), .fwd_b_sel(fwd_b_sel),
+        .stall_pc_ifid(stall_pc_ifid), .stall_idex(stall_idex),
+        .stall_exmem(stall_exmem), .stall_memwb(stall_memwb),
+        .flush_id(flush_id), .flush_ex(flush_ex)
+    );
+
+    logic [31:0] mem_alu_result_fwd, wb_data_fwd; /* mem_alu_result_fwd now driven by always_comb below, not a plain assign */
+    logic [31:0] fwd_a_val, fwd_b_val;
+    always_comb begin
+        unique case (fwd_a_sel)
+            2'b01:   fwd_a_val = mem_alu_result_fwd;
+            2'b10:   fwd_a_val = wb_data_fwd;
+            default: fwd_a_val = ex_rs1_data;
+        endcase
+        unique case (fwd_b_sel)
+            2'b01:   fwd_b_val = mem_alu_result_fwd;
+            2'b10:   fwd_b_val = wb_data_fwd;
+            default: fwd_b_val = ex_rs2_data;
+        endcase
+    end
+
+    logic [31:0] alu_a, alu_b, alu_result;
+    assign alu_a = ex_alu_src_a_pc ? ex_pc : fwd_a_val;
+    assign alu_b = ex_alu_src_b_imm ? ex_imm : fwd_b_val;
+    alu u_alu (.a(alu_a), .b(alu_b), .alu_op(ex_alu_op), .result(alu_result));
+
+    /* Idiom 4: fused compare+branch decision, sourced directly from
+     * alu_result (the SLT/SLTU/SLTI's own live output this cycle) rather
+     * than a register-file read one cycle later -- this elimination of
+     * the redundant read is the entire benefit of the idiom. */
+    wire fuse4_branch_taken = ex_fuse4_bne ? (alu_result != 32'b0) : (alu_result == 32'b0);
+
+    logic muldiv_start;
+    /* !stall_idex removed: it created a combinational LOOP once
+     * stall_idex (via hazard_unit) is driven by muldiv_active, which
+     * itself depends on muldiv_start -- Verilator's UNOPTFLAT correctly
+     * caught this, not a false positive to suppress. Raw !muldiv_busy
+     * alone is sufficient to prevent re-triggering: once busy rises the
+     * cycle after start, ex_is_muldiv stays true (the instruction is held
+     * in ID/EX by the resulting stall) but !muldiv_busy is now false, so
+     * start correctly does not re-pulse. No other signal in this design
+     * drives stall_idex besides the muldiv chain itself, so !stall_idex
+     * was never adding real information here. */
+    /* !muldiv_done added: without it, the exact cycle busy drops (the op
+     * just finished) also satisfies ex_is_muldiv && !muldiv_busy, since
+     * id_ex_reg hasn't advanced to a NEW instruction yet that same cycle
+     * (that happens on the upcoming edge) -- so the SAME just-finished
+     * instruction spuriously re-triggers itself, forever, since it never
+     * gets a chance to actually leave EX. Found via a genuinely-hung
+     * lockstep run (100 cycles, only 1 of 6 expected commits), traced to
+     * this exact cycle via a per-cycle debug dump, not caught at design
+     * time. done is a clean one-cycle pulse exactly on that transitional
+     * cycle, so excluding it closes the gap. */
+    logic isol_en;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            isol_en <= 1'b0;
+        else if (wb_is_fisol_bound)
+            isol_en <= 1'b1;
+        else if (wb_is_fisol_off)
+            isol_en <= 1'b0;
+    end
+
+    assign muldiv_start = ex_is_muldiv && !muldiv_busy && !muldiv_done;
+
+    /* MULDIV_EN per Part 8 SS2.3/SS2.10 item 2: the EX-local busy latch
+     * triggered by the ID decode pulse -- this is muldiv_active
+     * (busy || start), already built for the stall logic. FISOL.BOUND/OFF
+     * (isol_en) is a diagnostic no-op / measurement-window marker per
+     * Part 8 SS3, never a functional gate -- it must not feed this signal. */
+    wire muldiv_op_en = muldiv_active;
+
+    /* ISOL_ACTIVE (mhpmcounter4): cycles the gate is holding, i.e. every
+     * cycle MULDIV_EN is low. */
+    /* BR_CMP_EN widens isolation scope: when set, branch-compare
+     * activity (ex_is_branch driving the comparator) is also
+     * excluded from the isolation window, not just muldiv. This
+     * is the D_isol_scope_ablation knob -- BR_CMP_EN=0 reproduces
+     * the original (muldiv-only) scope; BR_CMP_EN=1 tests the
+     * wider scope. */
+    wire br_cmp_op_en = BR_CMP_EN && ex_is_branch;
+    wire isol_active /*verilator public*/ = ISOL_EN && !muldiv_op_en && !br_cmp_op_en;
+
+    // ===== ISOLATION GATE (added -- see rtl/isol_gate.sv) =====
+    // Reloads every cycle when ISOL_EN=0 (baseline, unchanged behavior).
+    // Gates on muldiv_op_en when ISOL_EN=1 (the real isolation effect).
+    logic [31:0] muldiv_a_gated, muldiv_b_gated;
+    isol_gate u_isol_gate_a (.clk(clk), .en(!ISOL_EN || muldiv_op_en), .d(fwd_a_val), .q(muldiv_a_gated));
+    isol_gate u_isol_gate_b (.clk(clk), .en(!ISOL_EN || muldiv_op_en), .d(fwd_b_val), .q(muldiv_b_gated));
+    // ===== END ISOLATION GATE =====
+
+    muldiv_iter u_muldiv (
+        .clk(clk), .rst_n(rst_n), .start(muldiv_start), .op_en(muldiv_op_en),
+        .a(muldiv_a_gated), .b(muldiv_b_gated), .op(ex_muldiv_op),
+        .busy(muldiv_busy), .done(muldiv_done), .result(muldiv_result_bus)
+    );
+
+    /* muldiv_busy is a REGISTERED output of muldiv_iter -- on the exact
+     * cycle muldiv_start first pulses, busy is still 0 (it only rises the
+     * FOLLOWING cycle), so gating the pipeline stall on raw muldiv_busy
+     * misses that first cycle and lets the pipeline advance one cycle too
+     * early, before the freeze actually engages. muldiv_active closes
+     * that gap by also stalling on the start pulse itself. Found via a
+     * failing lockstep run (x8 committed 0 instead of the real mul
+     * result), not caught at design time -- flagged rather than smoothed
+     * over. */
+    logic muldiv_active;
+    assign muldiv_active = muldiv_busy || muldiv_start;
+
+    logic branch_taken;
+    always_comb begin
+        unique case (ex_instr[14:12])
+            3'b000:  branch_taken = (fwd_a_val == fwd_b_val);
+            3'b001:  branch_taken = (fwd_a_val != fwd_b_val);
+            3'b100:  branch_taken = ($signed(fwd_a_val) <  $signed(fwd_b_val));
+            3'b101:  branch_taken = ($signed(fwd_a_val) >= $signed(fwd_b_val));
+            3'b110:  branch_taken = (fwd_a_val <  fwd_b_val);
+            3'b111:  branch_taken = (fwd_a_val >= fwd_b_val);
+            default: branch_taken = 1'b0;
+        endcase
+    end
+
+    logic        trap_taken, trap_we;
+    logic [31:0] trap_mepc_wdata, trap_mcause_wdata, trap_mtval_wdata;
+    logic [31:0] mepc, mcause, mtval, mtvec, trap_target;
+    trap_unit u_trap (
+        .illegal_instr(ex_illegal_instr), .faulting_pc(ex_pc), .faulting_instr(ex_instr),
+        .trap_taken(trap_taken), .trap_we(trap_we),
+        .trap_mepc_wdata(trap_mepc_wdata), .trap_mcause_wdata(trap_mcause_wdata),
+        .trap_mtval_wdata(trap_mtval_wdata)
+    );
+    assign trap_target = mtvec;
+
+    logic [31:0] csr_rdata_raw, csr_rdata_ex;
+    logic        wb_csr_we;
+    logic [11:0] wb_csr_addr;
+    logic [31:0] wb_csr_wdata;
+    csr_file u_csr_file (
+        .clk(clk), .rst_n(rst_n),
+        .csr_raddr(ex_csr_addr), .csr_rdata(csr_rdata_raw),
+        .csr_we(wb_csr_we), .csr_waddr(wb_csr_addr), .csr_wdata(wb_csr_wdata),
+        .trap_we(trap_we), .trap_mepc_wdata(trap_mepc_wdata),
+        .trap_mcause_wdata(trap_mcause_wdata), .trap_mtval_wdata(trap_mtval_wdata),
+        .mepc(mepc), .mcause(mcause), .mtval(mtval), .mtvec(mtvec),
+        .muldiv_active(muldiv_start), .isol_active(isol_active),
+        .fusion_active(fusion_active)
+    );
+
+    /* CSR RAW hazard fix: csr_file's read port has no forwarding of its
+     * own -- a CSR write in MEM or WB to the same address a later CSR
+     * read is issuing to (EX) is not yet visible in csr_file's registers,
+     * same class of hazard the GPR forwarding network already solves for
+     * rd_addr, never extended to csr_addr. Priority: MEM (younger) over
+     * WB (older). MEM/WB pending write value rides in muldiv_result per
+     * the existing CSR field-reuse convention. */
+    always_comb begin
+        if (mem_is_csr_out && mem_csr_addr_out == ex_csr_addr)
+            csr_rdata_ex = mem_muldiv_result;
+        else if (wb_is_csr && wb_csr_addr_out == ex_csr_addr)
+            csr_rdata_ex = wb_muldiv_result;
+        else
+            csr_rdata_ex = csr_rdata_raw;
+    end
+
+    logic [31:0] csr_wdata_ex;
+    always_comb begin
+        unique case (ex_csr_op)
+            2'b01:   csr_wdata_ex = fwd_a_val;                  /* CSRRW */
+            2'b10:   csr_wdata_ex = csr_rdata_ex | fwd_a_val;   /* CSRRS */
+            2'b11:   csr_wdata_ex = csr_rdata_ex & ~fwd_a_val;  /* CSRRC */
+            default: csr_wdata_ex = 32'b0;
+        endcase
+    end
+
+    logic [31:0] redirect_target;
+    assign pc_redirect = (ex_is_branch && branch_taken) || (ex_fuse4_valid && fuse4_branch_taken) || ex_is_jal || ex_is_jalr || trap_taken;
+    always_comb begin
+        if (trap_taken)          redirect_target = trap_target;
+        else if (ex_is_jalr)     redirect_target = (fwd_a_val + ex_imm) & ~32'd1;
+        else if (ex_fuse4_valid) redirect_target = ex_fuse4_target;
+        else                     redirect_target = ex_pc + ex_imm;
+    end
+    assign pc_next = pc_redirect ? redirect_target : (stall_pc_ifid ? pc : pc + 32'd4);
+
+    assign dbg_trap_taken = trap_taken;
+    assign dbg_mepc   = mepc;
+    assign dbg_mcause = mcause;
+    assign dbg_mtval  = mtval;
+
+    logic [31:0] mem_alu_result, mem_muldiv_result, mem_rs2_data, mem_pc_plus4, mem_imm_out, mem_instr;
+    logic        mem_reg_write, mem_mem_write, mem_mem_unsigned, mem_is_muldiv;
+    logic [1:0]  mem_mem_width, mem_result_src;
+    logic        mem_is_csr_out;
+    logic        mem_is_fisol_bound, mem_is_fisol_off;
+    logic [11:0] mem_csr_addr_out;
+
+    /* CSR ops reuse alu_result (pre-write value -> rd, free via existing
+     * result_src=00/is_muldiv=0 WB path + forwarding) and muldiv_result
+     * (new value -> csr_file's WB write port only; ignored by regfile). */
+    logic [31:0] ex_alu_result_final, ex_muldiv_result_final;
+    assign ex_alu_result_final    = ex_is_csr ? csr_rdata_ex : alu_result;
+    assign ex_muldiv_result_final = ex_is_csr ? csr_wdata_ex : muldiv_result_bus;
+
+    ex_mem_reg u_ex_mem (
+        .clk(clk), .rst_n(rst_n), .stall(stall_exmem), .clear(1'b0),
+        .alu_result_in(ex_alu_result_final), .muldiv_result_in(ex_muldiv_result_final),
+        .rs2_data_in(fwd_b_val), .pc_plus4_in(ex_pc + 32'd4), .imm_in(ex_imm),
+        .rd_addr_in(ex_rd_addr), .instr_in(ex_instr),
+        .reg_write_in(ex_reg_write), .mem_read_in(ex_mem_read), .mem_write_in(ex_mem_write),
+        .mem_width_in(ex_mem_width), .result_src_in(ex_result_src),
+        .mem_unsigned_in(ex_mem_unsigned), .is_muldiv_in(ex_is_muldiv),
+        .is_csr_in(ex_is_csr), .csr_addr_in(ex_csr_addr),
+        .is_fisol_bound_in(ex_is_fisol_bound), .is_fisol_off_in(ex_is_fisol_off),
+        .pend2_valid_in(ex_pend2_valid), .pend2_addr_in(ex_pend2_addr), .pend2_data_in(ex_pend2_data),
+
+        .alu_result_out(mem_alu_result), .muldiv_result_out(mem_muldiv_result),
+        .rs2_data_out(mem_rs2_data), .pc_plus4_out(mem_pc_plus4), .imm_out(mem_imm_out),
+        .rd_addr_out(mem_rd_addr), .instr_out(mem_instr),
+        .reg_write_out(mem_reg_write), .mem_read_out(mem_mem_read), .mem_write_out(mem_mem_write),
+        .mem_width_out(mem_mem_width), .result_src_out(mem_result_src),
+        .mem_unsigned_out(mem_mem_unsigned), .is_muldiv_out(mem_is_muldiv),
+        .is_csr_out(mem_is_csr_out), .csr_addr_out(mem_csr_addr_out),
+        .is_fisol_bound_out(mem_is_fisol_bound), .is_fisol_off_out(mem_is_fisol_off),
+        .pend2_valid_out(mem_pend2_valid), .pend2_addr_out(mem_pend2_addr), .pend2_data_out(mem_pend2_data)
+    );
+    assign mem_rd_addr_fwd = mem_rd_addr;
+    assign mem_reg_write_fwd = mem_reg_write;
+    /* Bug fix: forwarding from MEM must respect result_src, same as the
+     * WB-stage writeback mux already does -- a load's real result is
+     * mem_rdata (loaded data), not alu_result (which holds the computed
+     * ADDRESS for a load). The old version always forwarded alu_result/
+     * muldiv_result, silently forwarding the wrong value for every
+     * load-then-immediately-use pattern. regtest.s never caught this
+     * because its one load was the last real instruction, never forwarded
+     * anywhere. Found via the full lockstep suite (82/87 failures),
+     * isolated via t_loadstore specifically. */
+    always_comb begin
+        unique case (mem_result_src)
+            2'b00:   mem_alu_result_fwd = mem_is_muldiv ? mem_muldiv_result : mem_alu_result;
+            2'b01:   mem_alu_result_fwd = 32'hDEADBEEF; /* unreachable: load_use_hazard_mem stall means no EX-stage consumer ever selects fwd_sel==2'b01 for a load in MEM (see hazard_unit) */
+            2'b10:   mem_alu_result_fwd = mem_pc_plus4;
+            2'b11:   mem_alu_result_fwd = mem_imm_out;
+            default: mem_alu_result_fwd = 32'hDEADBEEF;
+        endcase
+    end
+
+    logic [31:0] mem_rdata_raw;
+    logic [31:0] mem_rdata_raw_d;
+    localparam logic [31:0] UART_TXDATA_ADDR = 32'h8000_0000;
+    /* UART_TXDATA aliases MEM_BASE in the unified mem[] array with no
+     * separate address-mapped IO region; without this guard a store to
+     * UART_TXDATA silently corrupts mem[0..3] (the reset-vector
+     * instruction), since dmem_off = mem_alu_result - MEM_BASE = 0 for
+     * that address. Real writes still commit for every other address;
+     * only the UART address is diverted away from the backing array.
+     * dbg_mem_we/dbg_mem_addr stay unconditional so tb_core.cpp's UART
+     * tap still fires. */
+    wire  [31:0] dmem_off = mem_alu_result - MEM_BASE;
+    wire  is_uart_txdata = (mem_alu_result == UART_TXDATA_ADDR);
+    logic [1:0] dmem_byte_sel_d;
+    always_ff @(posedge clk) begin
+        if (!stall_memwb) begin
+            mem_rdata_raw_d <= dmem[dmem_off[16:2]];
+            dmem_byte_sel_d <= dmem_off[1:0];
+        end
+    end
+    assign mem_rdata_raw = mem_rdata_raw_d >> (8*dmem_byte_sel_d);
+
+
+    logic [31:0] mem_wdata_trunc;
+    always_comb begin
+        unique case (mem_mem_width)
+            2'b00:   mem_wdata_trunc = {24'b0, mem_rs2_data[7:0]};
+            2'b01:   mem_wdata_trunc = {16'b0, mem_rs2_data[15:0]};
+            default: mem_wdata_trunc = mem_rs2_data;
+        endcase
+    end
+
+    /* BRAM-inference fix: byte-array writes (4 dynamic addresses in one
+     * process) can't map to a BRAM write port. Canonical Xilinx byte-enable
+     * word-write pattern instead: one word index, 4 independently-gated
+     * byte-lane writes to the SAME array element. */
+    logic [3:0]  dmem_byte_we;
+    logic [31:0] dmem_wdata_shifted;
+    always_comb begin
+        dmem_byte_we = 4'b0000;
+        dmem_wdata_shifted = 32'b0;
+        if (mem_mem_write && !is_uart_txdata) begin
+            unique case (mem_mem_width)
+                2'b00: begin
+                    dmem_byte_we = 4'b0001 << dmem_off[1:0];
+                    dmem_wdata_shifted = {24'b0, mem_rs2_data[7:0]} << (8*dmem_off[1:0]);
+                end
+                2'b01: begin
+                    dmem_byte_we = 4'b0011 << dmem_off[1:0];
+                    dmem_wdata_shifted = {16'b0, mem_rs2_data[15:0]} << (8*dmem_off[1:0]);
+                end
+                default: begin
+                    dmem_byte_we = 4'b1111;
+                    dmem_wdata_shifted = mem_rs2_data;
+                end
+            endcase
+        end
+    end
+    always_ff @(posedge clk) begin
+        if (!stall_exmem) begin
+            if (dmem_byte_we[0]) dmem[dmem_off[16:2]][7:0]   <= dmem_wdata_shifted[7:0];
+            if (dmem_byte_we[1]) dmem[dmem_off[16:2]][15:8]  <= dmem_wdata_shifted[15:8];
+            if (dmem_byte_we[2]) dmem[dmem_off[16:2]][23:16] <= dmem_wdata_shifted[23:16];
+            if (dmem_byte_we[3]) dmem[dmem_off[16:2]][31:24] <= dmem_wdata_shifted[31:24];
+        end
+    end
+
+    assign dbg_mem_pc     = mem_pc_plus4 - 32'd4;
+    assign dbg_mem_instr  = mem_instr;
+    assign dbg_mem_we     = mem_mem_write && !stall_exmem;
+    assign dbg_mem_addr   = mem_alu_result;
+    assign dbg_mem_wdata  = mem_wdata_trunc;
+    assign dbg_mem_width  = mem_mem_width;
+
+    logic [31:0] wb_mem_rdata; /* now combinational, driven in WB stage below, not a mem_wb_reg output */
+    logic [31:0] wb_alu_result, wb_muldiv_result, wb_pc_plus4, wb_imm_out, wb_instr;
+    logic [4:0]  wb_rd_addr;
+    logic        wb_reg_write;
+    logic [1:0]  wb_result_src;
+    logic        wb_is_muldiv;
+    logic        wb_is_csr;
+    logic [11:0] wb_csr_addr_out;
+    logic        wb_is_fisol_bound, wb_is_fisol_off;
+
+    logic [1:0] wb_mem_width;
+    logic       wb_mem_unsigned;
+    mem_wb_reg u_mem_wb (
+        .clk(clk), .rst_n(rst_n), .stall(stall_memwb), .clear(1'b0),
+        .alu_result_in(mem_alu_result), .muldiv_result_in(mem_muldiv_result),
+        .pc_plus4_in(mem_pc_plus4), .imm_in(mem_imm_out), .rd_addr_in(mem_rd_addr), .instr_in(mem_instr),
+        .reg_write_in(mem_reg_write), .result_src_in(mem_result_src), .is_muldiv_in(mem_is_muldiv),
+        .is_csr_in(mem_is_csr_out), .csr_addr_in(mem_csr_addr_out),
+        .is_fisol_bound_in(mem_is_fisol_bound), .is_fisol_off_in(mem_is_fisol_off),
+        .mem_width_in(mem_mem_width), .mem_unsigned_in(mem_mem_unsigned),
+        .pend2_valid_in(mem_pend2_valid), .pend2_addr_in(mem_pend2_addr), .pend2_data_in(mem_pend2_data),
+
+        .alu_result_out(wb_alu_result), .muldiv_result_out(wb_muldiv_result),
+        .pc_plus4_out(wb_pc_plus4), .imm_out(wb_imm_out), .rd_addr_out(wb_rd_addr), .instr_out(wb_instr),
+        .reg_write_out(wb_reg_write), .result_src_out(wb_result_src), .is_muldiv_out(wb_is_muldiv),
+        .is_csr_out(wb_is_csr), .csr_addr_out(wb_csr_addr_out),
+        .is_fisol_bound_out(wb_is_fisol_bound), .is_fisol_off_out(wb_is_fisol_off),
+        .mem_width_out(wb_mem_width), .mem_unsigned_out(wb_mem_unsigned),
+        .pend2_valid_out(wb_pend2_valid), .pend2_addr_out(wb_pend2_addr), .pend2_data_out(wb_pend2_data)
+    );
+    /* WB-stage sign/zero-extension: mem_rdata_raw_d (top-level, driven by
+     * the registered BRAM read) already lands in the correct WB-timed
+     * cycle on its own -- see the comment on mem_rdata_raw_d's always_ff
+     * above. Extending it here, using width/unsigned bits carried through
+     * mem_wb_reg, replaces the old MEM-stage mem_rdata extension that was
+     * one cycle too early for a registered read. */
+    always_comb begin
+        unique case (wb_mem_width)
+            2'b00:   wb_mem_rdata = wb_mem_unsigned ? {24'b0, mem_rdata_raw[7:0]}
+                                                     : {{24{mem_rdata_raw[7]}}, mem_rdata_raw[7:0]};
+            2'b01:   wb_mem_rdata = wb_mem_unsigned ? {16'b0, mem_rdata_raw[15:0]}
+                                                     : {{16{mem_rdata_raw[15]}}, mem_rdata_raw[15:0]};
+            default: wb_mem_rdata = mem_rdata_raw_d;
+        endcase
+    end
+    assign wb_rd_addr_fwd = wb_rd_addr;
+    assign wb_reg_write_fwd = wb_reg_write;
+
+    logic [31:0] wb_rd_data;
+    always_comb begin
+        unique case (wb_result_src)
+            2'b00:   wb_rd_data = wb_is_muldiv ? wb_muldiv_result : wb_alu_result;
+            2'b01:   wb_rd_data = wb_mem_rdata;
+            2'b10:   wb_rd_data = wb_pc_plus4;
+            2'b11:   wb_rd_data = wb_imm_out;
+            default: wb_rd_data = 32'hDEADBEEF;
+        endcase
+    end
+    assign wb_data_fwd = wb_rd_data;
+    /* pend2_fire_valid: deferred idiom-3 AUIPC write, one cycle after
+     * this instruction's own (JALR's) WB write -- fires through this
+     * same single write port. Front-end is frozen via pend2_active this
+     * whole time, so nothing real competes for the port this cycle. */
+    assign wb_rd_addr_for_rf   = pend2_fire_valid ? pend2_fire_addr : wb_rd_addr;
+    assign wb_reg_write_for_rf = pend2_fire_valid ? 1'b1 : (wb_reg_write && !stall_memwb);
+    assign wb_rd_data_for_rf   = pend2_fire_valid ? pend2_fire_data : wb_rd_data;
+
+    assign wb_csr_we    = wb_is_csr && !stall_memwb;
+    assign wb_csr_addr  = wb_csr_addr_out;
+    assign wb_csr_wdata = wb_muldiv_result;
+
+    assign dbg_wb_pc        = wb_pc_plus4 - 32'd4;
+    assign dbg_wb_instr     = wb_instr;
+    assign dbg_wb_reg_we    = wb_reg_write && (wb_rd_addr != 5'd0) && !stall_memwb;
+    assign dbg_wb_reg_addr  = wb_rd_addr;
+    assign dbg_wb_reg_wdata = wb_rd_data;
+
+    assign dbg_pend2_fire = pend2_fire_valid;
+    assign dbg_pend2_addr = pend2_fire_addr;
+    assign dbg_pend2_data = pend2_fire_data;
+endmodule
