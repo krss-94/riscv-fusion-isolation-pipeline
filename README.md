@@ -93,17 +93,22 @@ configs:
 
 ## Power (SAIF-based, post-synthesis, Artix-7 `xc7a100tcsg324-1`)
 
+`D_isol_scope_ablation`'s original power capture used a `post_synth.dcp`
+that had been silently rebuilt with fusion disabled (see the Timing
+section for how this was caught and fixed) — the row below is the
+corrected recapture on the fixed checkpoint.
+
 | Config | crc32 (W) | huffbench (W) | matmult-int (W) | nettle-aes (W) |
 |---|---|---|---|---|
 | A_baseline | 0.157 | 0.210 | 0.142 | 0.200 |
-| B_fusion_only | 0.192 | 0.243 | 0.176 | 0.235 |
 | C_isol_only | 0.166 | 0.211 | 0.148 | 0.206 |
+| B_fusion_only | 0.192 | 0.243 | 0.176 | 0.235 |
 | D_proposed | 0.192 | 0.244 | 0.175 | 0.241 |
-| D_isol_scope_ablation | 0.157 | 0.211 | 0.141 | 0.204 |
+| D_isol_scope_ablation | 0.188 | 0.245 | 0.175 | 0.242 |
 
 - **Fusion overhead (B vs. A):** +22.3% (crc32), +15.7% (huffbench), +23.9% (matmult-int), +17.5% (nettle-aes)
-- **Isolation-scope effect (C vs. D_isol_scope_ablation, both fusion-off):** -5.7%, 0%, -4.7%, -1% — small, inconsistent in sign
-- **Isolation on top of fusion (D_proposed vs. B_fusion_only):** within 1-3% across all 4 — no meaningful additional cost
+- **Isolation overhead alone (C vs. A):** +5.7%, +0.5%, +4.2%, +3% — small and consistently positive
+- **Isolation on top of fusion, narrow vs. wide scope (D_proposed and D_isol_scope_ablation vs. B_fusion_only):** both within 0-3% of fusion-only, and the two scope variants within 0-2% of each other — isolation choice barely moves power once fusion is on
 
 > Caveat: Design Nets Matched (fraction of nets with real SAIF switching
 > data) was 27-39% across all reports. Relative trends above are reliable
@@ -113,17 +118,19 @@ configs:
 
 ## Timing (post-route, Artix-7)
 
-**14ns constraint — failed for every fusion-enabled config:**
+Two earlier sweeps at 18ns are superseded and kept below for history. The
+final sweep also caught and fixed a real bug: `D_isol_scope_ablation`'s
+`post_synth.dcp` had been silently rebuilt at some point with `FUSION_EN=0`
+instead of `1` (confirmed via `check_fusion_enabled.tcl`, which found zero
+fusion-related cells in that checkpoint while `B_fusion_only`/`D_proposed`
+showed nonzero counts). Every number attributed to that config in every
+earlier sweep — including the SAIF power table above — was actually
+isolation-only with a different scope setting, not fusion+isolation. The
+checkpoint was rebuilt with the correct parameters
+(`synth_one.tcl D_isol_scope_ablation 1 1 1`) and reverified before the
+final numbers below were captured.
 
-| Config | WNS (ns) | Result |
-|---|---|---|
-| A_baseline | positive | PASS |
-| C_isol_only | +0.691 | PASS |
-| B_fusion_only | -2.449 | FAIL |
-| D_proposed | -2.449 | FAIL |
-| D_isol_scope_ablation | -1.935 | FAIL |
-
-**18ns — all 5 configs resynthesized and reimplemented from scratch at the new constraint (not reusing old checkpoints):**
+**First 18ns sweep (superseded — `D_proposed` built in a separate session from the other 4):**
 
 | Config | WNS (ns) | Failing endpoints |
 |---|---|---|
@@ -133,10 +140,38 @@ configs:
 | D_proposed | +0.464 | 0 |
 | D_isol_scope_ablation | +0.471 | 0 |
 
-All 5 configs meet timing at 18ns (~55.5MHz). Non-fusion configs carry
-+2.2 to +2.7ns of slack; fusion-enabled configs sit at +0.46 to +0.52ns —
-a real, measured ~2ns critical-path cost from fusion logic, consistent
-with the power result above.
+**Second 18ns sweep (superseded — consistent flow, but `D_isol_scope_ablation`'s checkpoint was silently built without fusion):**
+
+| Config | WNS (ns) | Failing endpoints |
+|---|---|---|
+| A_baseline | +1.551 | 0 |
+| B_fusion_only | +0.222 | 0 |
+| C_isol_only | +1.493 | 0 |
+| D_proposed | +0.543 | 0 |
+| D_isol_scope_ablation | +2.791 | 0 |
+
+**18ns, final — consistent flow, `D_isol_scope_ablation` checkpoint fixed and reverified. This is the trusted result:**
+
+| Config | WNS (ns) | Est. Fmax | Failing endpoints |
+|---|---|---|---|
+| A_baseline | +1.551 | 60.8 MHz | 0 |
+| C_isol_only | +1.493 | 60.6 MHz | 0 |
+| D_proposed | +0.543 | 57.3 MHz | 0 |
+| D_isol_scope_ablation | +0.295 | 56.5 MHz | 0 |
+| B_fusion_only | +0.222 | 56.3 MHz | 0 |
+
+All 5 configs meet timing at 18ns (~55.6MHz), 0 failing endpoints. The
+ordering is now monotonic and makes sense: baseline and isolation-only sit
+close together at the top — isolation alone costs almost nothing
+(~0.06ns, A→C). The two fusion+isolation combined configs sit in the
+middle. Fusion-only sits at the bottom, confirming fusion is the dominant
+timing cost (~1.33ns, A→B). Narrow isolation scope (`D_proposed`) costs
+less than wide scope (`D_isol_scope_ablation`) on top of fusion, which is
+the expected direction — a wider isolation boundary constrains more of the
+design.
+
+Full per-benchmark critical-path breakdown and DRC results are in
+[`RESULTS.md`](RESULTS.md).
 
 **Conclusion:** fusion is the microarchitectural feature that costs power
 and timing. Isolation gating, for its security/measurement-boundary value,
