@@ -161,6 +161,34 @@ window, so their average per-activation cost is much smaller or, in
 sglib-combined's case, net positive (correctness was independently confirmed
 via its own internal check, not just cycle count).
 
+### `pend2_stall` root-cause extended to huffbench and slre (2026-09-21)
+
+Instrumented `tb_pipeline.cpp` with a `pend2_active` episode-duration
+histogram (rising/falling edge of the signal, bucketed 0-7+ cycles) to test
+whether huffbench's and slre's fusion cost shares `ud`'s flat 4-cycle
+mechanism. Result: **confirmed, exactly** — every `pend2_stall` episode in
+both benchmarks lasted precisely 4 cycles, zero exceptions across 65 total
+episodes checked.
+
+| Benchmark | Total fusion activations | `pend2_stall` episodes | `pend2_stall` cost | Total cycle delta | Unexplained |
+|---|---|---|---|---|---|
+| huffbench | 92 | 5 | 20 cyc | 44 cyc | 24 cyc (~55%) |
+| slre | 1,513 | 60 | 240 cyc | 464 cyc | 224 cyc (~48%) |
+
+`pend2_active` only fires for idioms 3 and 5 (`core_top_pipelined.sv:242`),
+so it never touches idioms 1/2/4 — the majority of activations in both
+benchmarks (87/92 huffbench, 1,453/1,513 slre). That gap is where the
+unexplained delta lives.
+
+**Conclusion, stated plainly:** fusion's cost has two distinct sources —
+the confirmed `pend2_stall` freeze (idioms 3/5, exact 4-cycle penalty every
+time) and a second, currently unidentified per-activation cost in idioms
+1/2/4, of roughly comparable total magnitude in both benchmarks tested
+(~50/50 split). The second mechanism is not yet root-caused — isolating it
+would need per-idiom activation tagging (idioms 1-5 are already separate
+RTL signals), not yet instrumented. Reported as open, not folded into a
+single "fusion costs X" number it doesn't yet support.
+
 ## Verification
 
 | Suite | Configs | Result |
