@@ -76,10 +76,14 @@ trust.
 | D_proposed | +0.464 | 0 |
 | D_isol_scope_ablation | +0.471 | 0 |
 
-**18ns, consistent-flow sweep — final, trusted result.** All 5 configs run
-in one session, same `maxThreads=1`, same `DONT_TOUCH` on
-`u_isol_gate_a`/`u_isol_gate_b` in every config that has them, full
-`report_timing_summary` signoff (not router-estimated numbers):
+**18ns, consistent-flow sweep — superseded.** `D_isol_scope_ablation`'s
+`+2.791ns` result below turned out to be built from a `post_synth.dcp` that
+had been silently rebuilt with `FUSION_EN=0` (found via
+`check_fusion_enabled.tcl`, which showed zero fusion-related cells in that
+checkpoint vs. nonzero counts for `B_fusion_only`/`D_proposed`). Every
+number attributed to this config below — and the "no confirmed root cause"
+discussion that followed it — was actually isolation-only, not
+fusion+isolation. Kept for history; see the corrected result underneath.
 
 | Config | WNS (ns) | Est. Fmax | Failing endpoints |
 |---|---|---|---|
@@ -89,24 +93,27 @@ in one session, same `maxThreads=1`, same `DONT_TOUCH` on
 | D_proposed | +0.543 | 57.3 MHz | 0 |
 | D_isol_scope_ablation | +2.791 | 65.8 MHz | 0 |
 
+**18ns, final — `D_isol_scope_ablation` checkpoint rebuilt with correct
+parameters (`synth_one.tcl D_isol_scope_ablation 1 1 1`) and reverified.
+This is the trusted result:**
+
+| Config | WNS (ns) | Est. Fmax | Failing endpoints |
+|---|---|---|---|
+| A_baseline | +1.551 | 60.8 MHz | 0 |
+| C_isol_only | +1.493 | 60.6 MHz | 0 |
+| D_proposed | +0.543 | 57.3 MHz | 0 |
+| D_isol_scope_ablation | +0.295 | 56.5 MHz | 0 |
+| B_fusion_only | +0.222 | 56.3 MHz | 0 |
+
 **What this says:** fusion alone (A→B) costs ~1.33ns of slack — the
 dominant timing effect, consistent with the power-side conclusion.
-Isolation alone (A→C) costs only ~0.06ns — negligible by itself.
-
-**What it does NOT say, stated plainly:** the combined configs don't show
-isolation adding a further cost on top of fusion. `D_proposed`
-(fusion+isolation, narrow scope) has *more* slack than `B_fusion_only`
-(fusion alone) — +0.543ns vs +0.222ns. `D_isol_scope_ablation`
-(fusion+isolation, wide scope) has the *best* slack of all 5 configs,
-better than baseline, despite fusion being enabled. This is a real,
-reproducible result from the consistent-flow run, not placer noise — the
-noise question is specifically what the consistent-flow rerun was meant to
-resolve. No confirmed root cause exists yet for why the combined configs
-land here; a plausible but unverified guess is that `DONT_TOUCH` on the
-isolation gate cells happens to give the placer a better starting point in
-these two configs specifically. Reported as an open question rather than
-forced into a clean story the earlier, inconsistent-flow data seemed to
-suggest.
+Isolation alone (A→C) costs only ~0.06ns — negligible by itself. With the
+checkpoint bug fixed, the ordering is now monotonic and makes sense: narrow
+isolation scope (`D_proposed`) costs less than wide scope
+(`D_isol_scope_ablation`) on top of fusion — the expected direction, since
+a wider isolation boundary constrains more of the design. The earlier
+"D-configs beat baseline despite fusion" anomaly is resolved — it was never
+a real placer effect, just a config silently missing fusion.
 
 ### DRC (from an earlier single-config deep-dive session)
 
