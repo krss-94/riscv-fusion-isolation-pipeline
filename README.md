@@ -104,7 +104,7 @@ corrected recapture on the fixed checkpoint.
 | C_isol_only | 0.166 | 0.211 | 0.148 | 0.206 |
 | B_fusion_only | 0.192 | 0.243 | 0.176 | 0.235 |
 | D_proposed | 0.192 | 0.244 | 0.175 | 0.241 |
-| D_isol_scope_ablation | 0.188 | 0.245 | 0.175 | 0.242 |
+| D_isol_scope_ablation | 0.192 | 0.245 | 0.175 | 0.242 |
 
 - **Fusion overhead (B vs. A):** +22.3% (crc32), +15.7% (huffbench), +23.9% (matmult-int), +17.5% (nettle-aes)
 - **Isolation overhead alone (C vs. A):** +5.7%, +0.5%, +4.2%, +3% — small and consistently positive
