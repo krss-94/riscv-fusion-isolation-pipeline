@@ -196,6 +196,31 @@ would need per-idiom activation tagging (idioms 1-5 are already separate
 RTL signals), not yet instrumented. Reported as open, not folded into a
 single "fusion costs X" number it doesn't yet support.
 
+## Bugs found & fixed
+
+Full narrative in `README.md`; logged here for completeness against the
+raw data these bugs affected.
+
+**Idiom5 commit-suppression bug.** `core_top_pipelined.sv`'s `if_id_reg`
+`.clear()` OR-chain suppressed the first half of a fused pair for idioms
+1-4, but idiom5 was never added to that list — its ADD/ADDI half kept
+committing separately, with a corrupted value, alongside the correct
+deferred `pend2` write. Produced 44,646 extra spurious commits on the `ud`
+benchmark versus baseline. Root-caused by counting phantom commits against
+the `pend2`-drain trace and confirming an exact count match. Fixed by
+adding `fuse_idiom5` to the clear condition; verified zero regression
+across all 5 configs (92/92 lockstep still passing post-fix).
+
+**Isolation control policy bug.** `muldiv_op_en` was wired to `!isol_en` —
+a flag meant to be toggled only by the `FISOL.BOUND`/`FISOL.OFF`
+diagnostic instructions (architecturally a no-op measurement-window
+marker, never a functional gate). Any multiply issued during a
+`FISOL.BOUND` region produced the wrong result. Fixed by rewiring to the
+existing EX-local busy latch (`muldiv_active`), the correct functional
+gate per spec. The prior test had wrongly codified the buggy behavior as
+expected output; rewritten to check invariants instead of pinning stale
+values.
+
 ## Verification
 
 | Suite | Configs | Result |
