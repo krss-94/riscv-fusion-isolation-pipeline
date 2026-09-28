@@ -38,12 +38,21 @@ alone costs almost nothing (~0.06ns) and the narrow/wide scope difference
 on top of fusion is small but in the expected direction (wider scope costs
 slightly more).
 
-> **Caveat:** Design Nets Matched (fraction of nets with real SAIF switching
-> data vs. vectorless/default estimation) ranged 27-39% across all reports.
-> The *relative* trends above are trustworthy since the same partial-matching
-> methodology applies uniformly across all 5 configs, but the absolute
-> wattage figures should be presented as comparative power estimates under
-> partial SAIF annotation, not silicon-accurate absolute power.
+> **Caveat, refined 2026-09-28:** The blanket "27-39% nets matched" figure
+> masks a large spread by hierarchy block, confirmed via targeted
+> `report_switching_activity` sampling on `D_proposed`/crc32: isolation
+> gates `u_isol_gate_a`/`u_isol_gate_b` (the actual mechanism this paper's
+> isolation-overhead claim rests on) are **97.98% SAIF-verified**; pipeline
+> stage registers (`u_id_ex`/`u_ex_mem`/`u_mem_wb`) range **58-93%**; the
+> muldiv unit's internal control FSM is only **18.9%** verified. That gap
+> was isolated to a synthesis netlist-matching failure in the FSM's
+> re-encoded next-state logic (`FSM_sequential_state[*]_i_*_n_0` nodes
+> report an identical flat 0.5 default regardless of workload -- confirmed
+> by comparing a mul-free benchmark, crc32, against a mul-heavy one,
+> matmult-int, and finding byte-identical values), not a workload-dependent
+> measurement gap or evidence the unit was idle. **Isolation-overhead power
+> numbers above are high-confidence. Any claim about the muldiv unit's own
+> internal switching specifically should not be treated as SAIF-verified.**
 
 ## Timing (post-route, Artix-7)
 
