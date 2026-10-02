@@ -5,7 +5,7 @@
 ![Verification](https://img.shields.io/badge/Lockstep-92%2F92%20PASS-success)
 ![Standalone](https://img.shields.io/badge/Standalone-15%2F15%20PASS-success)
 ![Configs](https://img.shields.io/badge/Ablation%20Configs-5-orange)
-![Timing](https://img.shields.io/badge/Post--Route%20Timing-CLOSED-success)
+![Timing](https://img.shields.io/badge/Post--Route%20Timing-MET%20at%2018ns-success)
 ![License](https://img.shields.io/badge/License-MIT-lightgrey)
 
 A 5-stage in-order RV32IM pipeline in SystemVerilog, extended with two
@@ -13,8 +13,8 @@ hardware research features on top of a standard IF→ID→EX→MEM→WB core:
 **macro-op instruction fusion** and a **hardware isolation-gating scheme**
 for the multiply/divide unit. Built to answer one concrete research
 question — *does fusion, isolation, or both, actually save power, and at
-what cost?* — and answered with real post-synthesis silicon-target
-measurement, not simulation estimates.
+what cost?* — and answered with real post-synthesis and post-route FPGA
+(Artix-7) measurement, not simulation estimates.
 
 > Legacy note: earlier notes/commit history call this "ooo" (out-of-order).
 > It isn't — no ROB, no reservation stations, no OOO issue/retirement. It's
@@ -68,13 +68,14 @@ of both, reduce power — and what does each cost?
 | Effect | Finding |
 |---|---|
 | **Fusion power cost** | +16% to +24% over baseline, consistent across all 4 benchmarks tested |
-| **Fusion timing cost** | Post-route slack drops from +2.2/+2.7ns (no fusion) to +0.46/+0.52ns (fusion) at the same clock target — a real, measured ~2ns critical-path cost |
-| **Isolation power cost** | Within ±6% of baseline, inconsistent in sign (sometimes negative) |
-| **Isolation + fusion combined vs. fusion alone** | No measurable extra cost |
+| **Fusion timing cost** | At the same 18ns clock, post-route slack drops from +1.55ns (baseline) to +0.22ns (fusion only), about 1.3ns of the critical path (single run per config) |
+| **Isolation power cost** | +0.5% to +5.7% over baseline when alone, small and consistently positive |
+| **Isolation + fusion combined vs. fusion alone** | No measurable extra power or timing cost within single-run noise |
 
 **Conclusion:** fusion is the microarchitectural feature that actually costs
-power and timing. Isolation gating — for its security/measurement-boundary
-value — comes essentially for free.
+power and timing. Isolation gating, for its security/measurement-boundary
+value, has a small measured cost: under about 6% power, and no timing cost
+that a single run can distinguish from noise.
 
 ---
 
@@ -103,13 +104,18 @@ PC-->| fetch |-->| decode|-->|  ALU  |-->|  dmem |-->|  RF   |
 
 **Ablation configs:**
 
-| Config | Fusion | Isolation | Branch-cmp scope |
+| Config | Fusion | Isolation | `BR_CMP_EN` |
 |---|:---:|:---:|:---:|
-| `A_baseline` | ✗ | ✗ | — |
-| `B_fusion_only` | ✓ | ✗ | — |
-| `C_isol_only` | ✗ | ✓ | — |
-| `D_proposed` | ✓ | ✓ | narrow |
-| `D_isol_scope_ablation` | ✓ | ✓ | wide |
+| `A_baseline` | ✗ | ✗ | 0 |
+| `B_fusion_only` | ✓ | ✗ | 0 |
+| `C_isol_only` | ✗ | ✓ | 0 |
+| `D_proposed` | ✓ | ✓ | 0 |
+| `D_isol_scope_ablation` | ✓ | ✓ | 1 |
+
+`BR_CMP_EN` only feeds the `isol_active_cnt` HPM counter
+(`core_top_pipelined.sv:382-383`); it does not change the isolation gates.
+So the two D configs are near-identical hardware, and the last row is not a
+true isolation-scope experiment.
 
 ---
 
@@ -146,11 +152,15 @@ relative trends are trustworthy, absolute wattage should be read as a
 comparative estimate. Full detail in RESULTS.md.)*
 
 **Timing** (post-route, Artix-7, 18ns clock) — all 5 configs pass, 0 failing
-endpoints. Non-fusion configs carry +2.2 to +2.7ns slack; fusion-enabled
-configs sit at +0.46 to +0.52ns.
+endpoints. Baseline and isolation-only carry +1.55 / +1.49ns slack;
+fusion-enabled configs sit at +0.22 to +0.54ns. One place-and-route run per
+config: gaps among the three fusion configs (about 0.3ns) are not claimed
+as effects.
 
-Full power matrix and both timing-closure attempts (14ns fail → 18ns pass)
-are in [`RESULTS.md`](RESULTS.md).
+Full power matrix, the timing-closure history (14ns fail → 18ns pass), the
+stale-checkpoint bug that was caught and fixed, and an independent
+open-source area cross-check (fusion ~+2% area, isolation under 1%) are in
+[`RESULTS.md`](RESULTS.md).
 
 ---
 
@@ -220,8 +230,9 @@ RESULTS.md    Full PPA (power + timing) and benchmark data tables
 - RTL, verification, benchmarking, and PPA characterization: **complete**
   across all 5 ablation configs.
 - Open for future work: WB-port arbitration to remove the `pend2_stall`
-  structural cost; multi-seed place-and-route variance check on the power
-  numbers.
+  structural cost; multi-seed place-and-route variance check on both the
+  timing and power numbers (all current figures are single-run per config);
+  an ASIC-flow (Genus/Innovus) data point.
 
 ## License
 

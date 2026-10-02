@@ -2,15 +2,18 @@
 
 Full data behind the summary in `README.md`. All numbers below came from
 actual runs on the RTL (`sim_pipeline_*`) or actual Vivado synthesis/xsim
-reports — none are estimated or backfilled.
+reports -- none are estimated or backfilled. **Every PPA figure is a single
+run per config** (one place-and-route, one SAIF capture); differences of a
+few percent in power or a few tenths of a ns in slack are within what a
+multi-seed run could move, and are not claimed as effects below.
 
 ## Power (SAIF-based, post-synthesis)
 
 Captured via Vivado xsim SAIF switching-activity dumps, `report_power` per
 config per benchmark, Artix-7 (`xc7a100tcsg324-1`). `D_isol_scope_ablation`'s
 original power capture used a `post_synth.dcp` that had been silently
-rebuilt with `FUSION_EN=0` (see the Timing section above for how this was
-found and fixed) — the row below is the corrected recapture on the fixed
+rebuilt with `FUSION_EN=0` (see the Timing section below for how this was
+found and fixed) -- the row below is the corrected recapture on the fixed
 checkpoint.
 
 | Config | crc32 (W) | huffbench (W) | matmult-int (W) | nettle-aes (W) |
@@ -19,44 +22,54 @@ checkpoint.
 | C_isol_only | 0.166 | 0.211 | 0.148 | 0.206 |
 | B_fusion_only | 0.192 | 0.243 | 0.176 | 0.235 |
 | D_proposed | 0.192 | 0.244 | 0.175 | 0.241 |
-| D_isol_scope_ablation | 0.188 | 0.245 | 0.175 | 0.242 |
+| D_isol_scope_ablation | 0.192 | 0.245 | 0.175 | 0.242 |
 
 **Fusion overhead (B vs A):** crc32 +22.3%, huffbench +15.7%,
-matmult-int +23.9%, nettle-aes +17.5% — a tight 16-24% band across every
+matmult-int +23.9%, nettle-aes +17.5% -- a tight 16-24% band across every
 benchmark tested.
 
 **Isolation overhead alone (C vs A):** crc32 +5.7%, huffbench +0.5%,
-matmult-int +4.2%, nettle-aes +3% — small and consistently positive,
+matmult-int +4.2%, nettle-aes +3% -- small and consistently positive,
 unlike fusion.
 
-**Isolation on top of fusion, narrow vs wide scope (D_proposed and
-D_isol_scope_ablation vs B_fusion_only):** both land within 0-3% of
-`B_fusion_only` across all 4 benchmarks, and the two scope variants are
-within 0-2% of each other. Isolation choice barely moves power once fusion
-is already on — consistent with the timing result above, where isolation
-alone costs almost nothing (~0.06ns) and the narrow/wide scope difference
-on top of fusion is small but in the expected direction (wider scope costs
-slightly more).
+**Isolation on top of fusion (D_proposed and D_isol_scope_ablation vs
+B_fusion_only):** both land within 0-3% of `B_fusion_only` across all 4
+benchmarks. Isolation barely moves power once fusion is already on.
 
-> **Caveat:** Design Nets Matched (fraction of nets with real SAIF switching
-> data vs. vectorless/default estimation) ranged 27-39% across all reports.
-> The *relative* trends above are trustworthy since the same partial-matching
-> methodology applies uniformly across all 5 configs, but the absolute
-> wattage figures should be presented as comparative power estimates under
-> partial SAIF annotation, not silicon-accurate absolute power.
+**About the two D configs:** they differ only in `BR_CMP_EN`, which in the
+RTL feeds only the `isol_active_cnt` HPM counter (`core_top_pipelined.sv`
+lines 382-383) and does not change the isolation gates. So
+`D_isol_scope_ablation` is not a real "wide vs narrow isolation scope"
+experiment, and no scope effect is claimed. The two D rows agree to within
+0-2%, as expected for near-identical hardware.
+
+> **Caveat, refined 2026-09-28:** The blanket "27-39% nets matched" figure
+> masks a large spread by hierarchy block, confirmed via targeted
+> `report_switching_activity` sampling on `D_proposed`/crc32: isolation
+> gates `u_isol_gate_a`/`u_isol_gate_b` (the actual mechanism this paper's
+> isolation-overhead claim rests on) are **97.98% SAIF-verified**; pipeline
+> stage registers (`u_id_ex`/`u_ex_mem`/`u_mem_wb`) range **58-93%**; the
+> muldiv unit's internal control FSM is only **18.9%** verified. That gap
+> was isolated to a synthesis netlist-matching failure in the FSM's
+> re-encoded next-state logic (`FSM_sequential_state[*]_i_*_n_0` nodes
+> report an identical flat 0.5 default regardless of workload -- confirmed
+> by comparing a mul-free benchmark, crc32, against a mul-heavy one,
+> matmult-int, and finding byte-identical values), not a workload-dependent
+> measurement gap or evidence the unit was idle. **Isolation-overhead power
+> numbers above are high-confidence. Any claim about the muldiv unit's own
+> internal switching specifically should not be treated as SAIF-verified.**
 
 ## Timing (post-route, Artix-7)
 
-Three sweeps were run before landing on a trustworthy number. The first two
-used `impl_one.tcl`, run once per config by hand across separate sessions —
-this left `D_proposed` built without `maxThreads=1` while the other four
-configs had it, and without a `DONT_TOUCH` on the isolation gate cells,
-so its numbers weren't apples-to-apples with the rest. The final sweep
-(`vivado_impl/impl_all_configs.tcl`) runs all 5 configs back-to-back in one
-Vivado batch session with identical settings — that one is the number to
-trust.
+Several sweeps were run before landing on a trustworthy number. The first
+two used `impl_one.tcl`, run once per config by hand across separate
+sessions -- this left `D_proposed` built without `maxThreads=1` while the
+other four configs had it, and without a `DONT_TOUCH` on the isolation gate
+cells, so its numbers weren't apples-to-apples with the rest. The later
+sweep (`vivado_impl/impl_all_configs.tcl`) runs all 5 configs back-to-back
+in one Vivado batch session with identical settings.
 
-**14ns — failed for fusion-enabled configs (superseded, kept for history):**
+**14ns -- failed for fusion-enabled configs (superseded, kept for history):**
 
 | Config | WNS (ns) | Result |
 |---|---|---|
@@ -66,7 +79,7 @@ trust.
 | D_proposed | -2.449 | FAIL |
 | D_isol_scope_ablation | -1.935 | FAIL |
 
-**18ns, inconsistent-flow sweep (superseded — `D_proposed` built separately from the other 4):**
+**18ns, inconsistent-flow sweep (superseded -- `D_proposed` built separately from the other 4):**
 
 | Config | WNS (ns) | Failing endpoints |
 |---|---|---|
@@ -76,10 +89,14 @@ trust.
 | D_proposed | +0.464 | 0 |
 | D_isol_scope_ablation | +0.471 | 0 |
 
-**18ns, consistent-flow sweep — final, trusted result.** All 5 configs run
-in one session, same `maxThreads=1`, same `DONT_TOUCH` on
-`u_isol_gate_a`/`u_isol_gate_b` in every config that has them, full
-`report_timing_summary` signoff (not router-estimated numbers):
+**18ns, consistent-flow sweep -- superseded.** `D_isol_scope_ablation`'s
+`+2.791ns` result in this sweep turned out to be built from a
+`post_synth.dcp` that had been silently rebuilt with `FUSION_EN=0` (found
+via `check_fusion_enabled.tcl`, which showed zero fusion-related cells in
+that checkpoint vs. nonzero counts for `B_fusion_only`/`D_proposed`). Every
+number attributed to that config in this sweep -- and the "no confirmed root
+cause" discussion that followed it -- was actually isolation-only, not
+fusion+isolation. Kept for history; see the corrected result underneath.
 
 | Config | WNS (ns) | Est. Fmax | Failing endpoints |
 |---|---|---|---|
@@ -89,24 +106,34 @@ in one session, same `maxThreads=1`, same `DONT_TOUCH` on
 | D_proposed | +0.543 | 57.3 MHz | 0 |
 | D_isol_scope_ablation | +2.791 | 65.8 MHz | 0 |
 
-**What this says:** fusion alone (A→B) costs ~1.33ns of slack — the
-dominant timing effect, consistent with the power-side conclusion.
-Isolation alone (A→C) costs only ~0.06ns — negligible by itself.
+**18ns, final -- `D_isol_scope_ablation` checkpoint rebuilt with correct
+parameters (`synth_one.tcl D_isol_scope_ablation 1 1 1`) and reverified.
+Single run per config:**
 
-**What it does NOT say, stated plainly:** the combined configs don't show
-isolation adding a further cost on top of fusion. `D_proposed`
-(fusion+isolation, narrow scope) has *more* slack than `B_fusion_only`
-(fusion alone) — +0.543ns vs +0.222ns. `D_isol_scope_ablation`
-(fusion+isolation, wide scope) has the *best* slack of all 5 configs,
-better than baseline, despite fusion being enabled. This is a real,
-reproducible result from the consistent-flow run, not placer noise — the
-noise question is specifically what the consistent-flow rerun was meant to
-resolve. No confirmed root cause exists yet for why the combined configs
-land here; a plausible but unverified guess is that `DONT_TOUCH` on the
-isolation gate cells happens to give the placer a better starting point in
-these two configs specifically. Reported as an open question rather than
-forced into a clean story the earlier, inconsistent-flow data seemed to
-suggest.
+| Config | WNS (ns) | Est. Fmax | Failing endpoints |
+|---|---|---|---|
+| A_baseline | +1.551 | 60.8 MHz | 0 |
+| C_isol_only | +1.493 | 60.6 MHz | 0 |
+| D_proposed | +0.543 | 57.3 MHz | 0 |
+| D_isol_scope_ablation | +0.295 | 56.5 MHz | 0 |
+| B_fusion_only | +0.222 | 56.3 MHz | 0 |
+
+**What this says:** fusion alone (A->B) costs ~1.33ns of slack -- the
+dominant timing effect, consistent with the power-side conclusion.
+Isolation alone (A->C) costs ~0.06ns, which is within what one run can
+distinguish from noise, so the honest reading is "no measurable timing cost
+from isolation alone".
+
+**What it does not say:** the three fusion configs (B +0.222, D_isol_scope
++0.295, D_proposed +0.543) sit within about 0.3ns of each other, from one
+place-and-route run each. `D_proposed` has slightly *more* slack than
+`B_fusion_only`, so there is no evidence that isolation adds timing cost on
+top of fusion. The 0.25ns gap between `D_proposed` and
+`D_isol_scope_ablation` is **not** a scope effect: those two configs differ
+only in `BR_CMP_EN`, which does not change the isolation gates (see the
+Power section). Treat it as place-and-route variation, and do not rank B,
+D_proposed and D_isol_scope_ablation against each other. A multi-seed run
+would put a real spread on this.
 
 ### DRC (from an earlier single-config deep-dive session)
 
@@ -128,6 +155,26 @@ read, through 15 logic levels, to `imem_reg_0_*`'s `ENBWREN` (fanout 51) /
 is net delay, not logic delay — the path is routing-bound. Cheapest lever,
 not yet applied: `phys_opt_design -directive AggressiveFanoutOpt`, or
 hand-replicating the stall/flush driver feeding those imem control pins.
+
+## Cross-check: relative area in open-source flows (synthesis only)
+
+An independent check of the area deltas, using open-source flows. Relative
+numbers only: these are different libraries and nodes from Artix-7, with
+the memory shrunk to keep runtimes sane (same size in every config, 4 KB for
+the yosys runs, 1 KB for ORFS). Not timing and not power.
+
+| Flow | Stage | Fusion (B vs A) | Isolation (C vs A) | D_proposed vs A | D_isol_scope vs D_proposed |
+|---|---|---|---|---|---|
+| yosys + sky130_fd_sc_hd, 4 KB | synthesis | +2.10% | +0.26% | +2.29% | +0.06% |
+| yosys + Nangate45, 4 KB | synthesis | +2.01% | +0.27% | +2.27% | +0.03% |
+| OpenROAD-flow-scripts sky130hd, 1 KB | post-route | +5.01% | +0.87% | +5.38% | +0.80% |
+
+Fusion costs a few percent of area, isolation under 1%, and the two D
+configs are essentially the same hardware, consistent with the Vivado
+conclusions. The percentages grow as the memory shrinks because the fusion
+logic is a fixed cost against less memory area. The ORFS slack and
+vectorless power from the same runs are not reported: slack differences
+there were within run-to-run noise and power is not SAIF-based.
 
 ## Benchmarks
 
