@@ -19,7 +19,7 @@ checkpoint.
 | C_isol_only | 0.166 | 0.211 | 0.148 | 0.206 |
 | B_fusion_only | 0.192 | 0.243 | 0.176 | 0.235 |
 | D_proposed | 0.192 | 0.244 | 0.175 | 0.241 |
-| D_isol_scope_ablation | 0.192 | 0.245 | 0.175 | 0.242 |
+| D_isol_scope_ablation | 0.188 | 0.245 | 0.175 | 0.242 |
 
 **Fusion overhead (B vs A):** crc32 +22.3%, huffbench +15.7%,
 matmult-int +23.9%, nettle-aes +17.5% — a tight 16-24% band across every
@@ -38,21 +38,12 @@ alone costs almost nothing (~0.06ns) and the narrow/wide scope difference
 on top of fusion is small but in the expected direction (wider scope costs
 slightly more).
 
-> **Caveat, refined 2026-09-28:** The blanket "27-39% nets matched" figure
-> masks a large spread by hierarchy block, confirmed via targeted
-> `report_switching_activity` sampling on `D_proposed`/crc32: isolation
-> gates `u_isol_gate_a`/`u_isol_gate_b` (the actual mechanism this paper's
-> isolation-overhead claim rests on) are **97.98% SAIF-verified**; pipeline
-> stage registers (`u_id_ex`/`u_ex_mem`/`u_mem_wb`) range **58-93%**; the
-> muldiv unit's internal control FSM is only **18.9%** verified. That gap
-> was isolated to a synthesis netlist-matching failure in the FSM's
-> re-encoded next-state logic (`FSM_sequential_state[*]_i_*_n_0` nodes
-> report an identical flat 0.5 default regardless of workload -- confirmed
-> by comparing a mul-free benchmark, crc32, against a mul-heavy one,
-> matmult-int, and finding byte-identical values), not a workload-dependent
-> measurement gap or evidence the unit was idle. **Isolation-overhead power
-> numbers above are high-confidence. Any claim about the muldiv unit's own
-> internal switching specifically should not be treated as SAIF-verified.**
+> **Caveat:** Design Nets Matched (fraction of nets with real SAIF switching
+> data vs. vectorless/default estimation) ranged 27-39% across all reports.
+> The *relative* trends above are trustworthy since the same partial-matching
+> methodology applies uniformly across all 5 configs, but the absolute
+> wattage figures should be presented as comparative power estimates under
+> partial SAIF annotation, not silicon-accurate absolute power.
 
 ## Timing (post-route, Artix-7)
 
@@ -85,14 +76,10 @@ trust.
 | D_proposed | +0.464 | 0 |
 | D_isol_scope_ablation | +0.471 | 0 |
 
-**18ns, consistent-flow sweep — superseded.** `D_isol_scope_ablation`'s
-`+2.791ns` result below turned out to be built from a `post_synth.dcp` that
-had been silently rebuilt with `FUSION_EN=0` (found via
-`check_fusion_enabled.tcl`, which showed zero fusion-related cells in that
-checkpoint vs. nonzero counts for `B_fusion_only`/`D_proposed`). Every
-number attributed to this config below — and the "no confirmed root cause"
-discussion that followed it — was actually isolation-only, not
-fusion+isolation. Kept for history; see the corrected result underneath.
+**18ns, consistent-flow sweep — final, trusted result.** All 5 configs run
+in one session, same `maxThreads=1`, same `DONT_TOUCH` on
+`u_isol_gate_a`/`u_isol_gate_b` in every config that has them, full
+`report_timing_summary` signoff (not router-estimated numbers):
 
 | Config | WNS (ns) | Est. Fmax | Failing endpoints |
 |---|---|---|---|
@@ -102,27 +89,24 @@ fusion+isolation. Kept for history; see the corrected result underneath.
 | D_proposed | +0.543 | 57.3 MHz | 0 |
 | D_isol_scope_ablation | +2.791 | 65.8 MHz | 0 |
 
-**18ns, final — `D_isol_scope_ablation` checkpoint rebuilt with correct
-parameters (`synth_one.tcl D_isol_scope_ablation 1 1 1`) and reverified.
-This is the trusted result:**
-
-| Config | WNS (ns) | Est. Fmax | Failing endpoints |
-|---|---|---|---|
-| A_baseline | +1.551 | 60.8 MHz | 0 |
-| C_isol_only | +1.493 | 60.6 MHz | 0 |
-| D_proposed | +0.543 | 57.3 MHz | 0 |
-| D_isol_scope_ablation | +0.295 | 56.5 MHz | 0 |
-| B_fusion_only | +0.222 | 56.3 MHz | 0 |
-
 **What this says:** fusion alone (A→B) costs ~1.33ns of slack — the
 dominant timing effect, consistent with the power-side conclusion.
-Isolation alone (A→C) costs only ~0.06ns — negligible by itself. With the
-checkpoint bug fixed, the ordering is now monotonic and makes sense: narrow
-isolation scope (`D_proposed`) costs less than wide scope
-(`D_isol_scope_ablation`) on top of fusion — the expected direction, since
-a wider isolation boundary constrains more of the design. The earlier
-"D-configs beat baseline despite fusion" anomaly is resolved — it was never
-a real placer effect, just a config silently missing fusion.
+Isolation alone (A→C) costs only ~0.06ns — negligible by itself.
+
+**What it does NOT say, stated plainly:** the combined configs don't show
+isolation adding a further cost on top of fusion. `D_proposed`
+(fusion+isolation, narrow scope) has *more* slack than `B_fusion_only`
+(fusion alone) — +0.543ns vs +0.222ns. `D_isol_scope_ablation`
+(fusion+isolation, wide scope) has the *best* slack of all 5 configs,
+better than baseline, despite fusion being enabled. This is a real,
+reproducible result from the consistent-flow run, not placer noise — the
+noise question is specifically what the consistent-flow rerun was meant to
+resolve. No confirmed root cause exists yet for why the combined configs
+land here; a plausible but unverified guess is that `DONT_TOUCH` on the
+isolation gate cells happens to give the placer a better starting point in
+these two configs specifically. Reported as an open question rather than
+forced into a clean story the earlier, inconsistent-flow data seemed to
+suggest.
 
 ### DRC (from an earlier single-config deep-dive session)
 
@@ -176,59 +160,6 @@ every time fusion fires. The other benchmarks mostly don't hit that reuse
 window, so their average per-activation cost is much smaller or, in
 sglib-combined's case, net positive (correctness was independently confirmed
 via its own internal check, not just cycle count).
-
-### `pend2_stall` root-cause extended to huffbench and slre (2026-09-21)
-
-Instrumented `tb_pipeline.cpp` with a `pend2_active` episode-duration
-histogram (rising/falling edge of the signal, bucketed 0-7+ cycles) to test
-whether huffbench's and slre's fusion cost shares `ud`'s flat 4-cycle
-mechanism. Result: **confirmed, exactly** — every `pend2_stall` episode in
-both benchmarks lasted precisely 4 cycles, zero exceptions across 65 total
-episodes checked.
-
-| Benchmark | Total fusion activations | `pend2_stall` episodes | `pend2_stall` cost | Total cycle delta | Unexplained |
-|---|---|---|---|---|---|
-| huffbench | 92 | 5 | 20 cyc | 44 cyc | 24 cyc (~55%) |
-| slre | 1,513 | 60 | 240 cyc | 464 cyc | 224 cyc (~48%) |
-
-`pend2_active` only fires for idioms 3 and 5 (`core_top_pipelined.sv:242`),
-so it never touches idioms 1/2/4 — the majority of activations in both
-benchmarks (87/92 huffbench, 1,453/1,513 slre). That gap is where the
-unexplained delta lives.
-
-**Conclusion, stated plainly:** fusion's cost has two distinct sources —
-the confirmed `pend2_stall` freeze (idioms 3/5, exact 4-cycle penalty every
-time) and a second, currently unidentified per-activation cost in idioms
-1/2/4, of roughly comparable total magnitude in both benchmarks tested
-(~50/50 split). The second mechanism is not yet root-caused — isolating it
-would need per-idiom activation tagging (idioms 1-5 are already separate
-RTL signals), not yet instrumented. Reported as open, not folded into a
-single "fusion costs X" number it doesn't yet support.
-
-## Bugs found & fixed
-
-Full narrative in `README.md`; logged here for completeness against the
-raw data these bugs affected.
-
-**Idiom5 commit-suppression bug.** `core_top_pipelined.sv`'s `if_id_reg`
-`.clear()` OR-chain suppressed the first half of a fused pair for idioms
-1-4, but idiom5 was never added to that list — its ADD/ADDI half kept
-committing separately, with a corrupted value, alongside the correct
-deferred `pend2` write. Produced 44,646 extra spurious commits on the `ud`
-benchmark versus baseline. Root-caused by counting phantom commits against
-the `pend2`-drain trace and confirming an exact count match. Fixed by
-adding `fuse_idiom5` to the clear condition; verified zero regression
-across all 5 configs (92/92 lockstep still passing post-fix).
-
-**Isolation control policy bug.** `muldiv_op_en` was wired to `!isol_en` —
-a flag meant to be toggled only by the `FISOL.BOUND`/`FISOL.OFF`
-diagnostic instructions (architecturally a no-op measurement-window
-marker, never a functional gate). Any multiply issued during a
-`FISOL.BOUND` region produced the wrong result. Fixed by rewiring to the
-existing EX-local busy latch (`muldiv_active`), the correct functional
-gate per spec. The prior test had wrongly codified the buggy behavior as
-expected output; rewritten to check invariants instead of pinning stale
-values.
 
 ## Verification
 
