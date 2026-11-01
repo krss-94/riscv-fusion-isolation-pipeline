@@ -1,0 +1,41 @@
+CADENCE FLOW QUICK START
+========================
+
+BEFORE YOU START:
+1. Source your lab's Cadence setup (so genus/innovus/tempus are on PATH)
+2. Copy a real benchmark hex to cadence/imem_init.hex (e.g., matmult-int.hex)
+
+STEP 1: Discover GPDK045 paths
+-------------------------------
+bash 00_discover_gpdk.sh 2>&1 | tee discover.txt
+
+Then edit config.tcl and fix all lines marked "<<< CHECK" with the real paths
+from discover.txt output.
+
+STEP 2: Test synthesis (4KB memory - MUCH faster than 128KB)
+------------------------------------------------------------
+MEM_HEX=0000_1000 ./run_flow.sh D_proposed genus
+
+Check logs/genus_D_proposed* for errors. If synthesis works, continue.
+
+STEP 3: Place & Route
+----------------------
+MEM_HEX=0000_1000 ./run_flow.sh D_proposed innovus
+
+This will take 15-30 minutes even at 4KB. Check reports/D_proposed/*.rpt when done.
+
+STEP 4: Timing signoff (optional)
+----------------------------------
+MEM_HEX=0000_1000 ./run_flow.sh D_proposed tempus
+
+STEP 5: Run baseline for comparison
+------------------------------------
+MEM_HEX=0000_1000 ./run_flow.sh A_baseline
+
+Now you have A_baseline vs D_proposed at 4KB - enough for area/timing comparison!
+
+NOTES:
+- 4KB memory = 1024 words = 32K flip-flops (manageable)
+- 128KB memory = 32768 words = 1M flip-flops (VERY slow, only try if 4KB worked)
+- Use same MEM_HEX value for all configs you want to compare
+- Reports go to reports/<config>/, netlists to out/<config>/

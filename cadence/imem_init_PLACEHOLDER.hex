@@ -1,0 +1,10 @@
+# PLACEHOLDER FILE - REPLACE THIS BEFORE RUNNING
+#
+# Copy a real benchmark hex file here as "imem_init.hex"
+# For example, from your Vivado runs: matmult-int.hex
+#
+# The Cadence scripts will create a dummy all-NOP file if this is missing,
+# but the PPA numbers will be meaningless because synthesis will fold away
+# most of the design.
+#
+# Use the SAME hex file for ALL configs to make them comparable!
