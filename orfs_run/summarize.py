@@ -7,7 +7,7 @@ for rpt in glob.glob(f"{flow}/reports/nangate45/*/*/6_finish.rpt"):
     parts = rpt.split("/"); name, tag = parts[-3], parts[-2]
     t = open(rpt, errors="ignore").read()
     wns = re.search(r"worst slack max\s+(-?[\d.]+)", t)
-    area = re.search(r"Design area\s+([\d.]+)\s+u\^2", t)
+    area = re.search(r"Design area\s+([\d.]+)\s+um\^2", t)
     rows.append(dict(config=name, run=tag,
                      wns_ns=float(wns.group(1)) if wns else None,
                      area_um2=float(area.group(1)) if area else None))

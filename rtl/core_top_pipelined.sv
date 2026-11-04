@@ -54,7 +54,9 @@ module core_top_pipelined #(
     logic        flush_id;
     logic        stall_pc_ifid;
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n || flush_id) begin
+        if (!rst_n) begin
+            pc_d <= MEM_BASE; if_instr_r <= 32'h00000013; if_instr_next_r <= 32'h00000013;
+        end else if (flush_id) begin
             pc_d <= MEM_BASE; if_instr_r <= 32'h00000013; if_instr_next_r <= 32'h00000013;
         end else if (!stall_pc_ifid) begin
             pc_d <= pc;

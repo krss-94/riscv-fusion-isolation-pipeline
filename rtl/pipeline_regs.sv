@@ -22,7 +22,10 @@ module if_id_reg (
      * control-flow-boundary hazard, distinct from the register-
      * dependency interlock in SS2.2/SS2.5. */
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n || clear) begin
+        if (!rst_n) begin
+            pc_out <= 32'b0; instr_out <= 32'h00000013;
+            instr_next_out <= 32'h00000013; lookahead_valid_out <= 1'b0;
+        end else if (clear) begin
             pc_out <= 32'b0; instr_out <= 32'h00000013;
             instr_next_out <= 32'h00000013; lookahead_valid_out <= 1'b0;
         end else if (!stall) begin
@@ -79,7 +82,20 @@ module id_ex_reg (
     output logic [31:0] fuse4_target_out
 );
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n || clear) begin
+        if (!rst_n) begin
+            pc_out <= 32'b0; rs1_data_out <= 32'b0; rs2_data_out <= 32'b0; imm_out <= 32'b0;
+            rs1_addr_out <= 5'b0; rs2_addr_out <= 5'b0; rd_addr_out <= 5'b0;
+            instr_out <= 32'h00000013;
+            reg_write_out <= 1'b0; mem_read_out <= 1'b0; mem_write_out <= 1'b0;
+            mem_width_out <= 2'b10; result_src_out <= 2'b00; mem_unsigned_out <= 1'b0;
+            alu_op_out <= 4'b0; alu_src_a_pc_out <= 1'b0; alu_src_b_imm_out <= 1'b0;
+            is_muldiv_out <= 1'b0; is_branch_out <= 1'b0; is_jal_out <= 1'b0; is_jalr_out <= 1'b0;
+            muldiv_op_out <= 3'b0; illegal_instr_out <= 1'b0; is_csr_out <= 1'b0;
+            csr_op_out <= 2'b0; csr_addr_out <= 12'b0;
+            is_fisol_bound_out <= 1'b0; is_fisol_off_out <= 1'b0;
+            pend2_valid_out <= 1'b0; pend2_addr_out <= 5'b0; pend2_data_out <= 32'b0;
+            fuse4_valid_out <= 1'b0; fuse4_bne_out <= 1'b0; fuse4_target_out <= 32'b0;
+        end else if (clear) begin
             pc_out <= 32'b0; rs1_data_out <= 32'b0; rs2_data_out <= 32'b0; imm_out <= 32'b0;
             rs1_addr_out <= 5'b0; rs2_addr_out <= 5'b0; rd_addr_out <= 5'b0;
             instr_out <= 32'h00000013;
@@ -139,7 +155,15 @@ module ex_mem_reg (
     output logic [31:0] pend2_data_out
 );
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n || clear) begin
+        if (!rst_n) begin
+            alu_result_out <= 32'b0; muldiv_result_out <= 32'b0; rs2_data_out <= 32'b0;
+            pc_plus4_out <= 32'b0; imm_out <= 32'b0; rd_addr_out <= 5'b0; instr_out <= 32'h00000013;
+            reg_write_out <= 1'b0; mem_read_out <= 1'b0; mem_write_out <= 1'b0;
+            mem_width_out <= 2'b10; result_src_out <= 2'b00; mem_unsigned_out <= 1'b0; is_muldiv_out <= 1'b0;
+            is_csr_out <= 1'b0; csr_addr_out <= 12'b0;
+            is_fisol_bound_out <= 1'b0; is_fisol_off_out <= 1'b0;
+            pend2_valid_out <= 1'b0; pend2_addr_out <= 5'b0; pend2_data_out <= 32'b0;
+        end else if (clear) begin
             alu_result_out <= 32'b0; muldiv_result_out <= 32'b0; rs2_data_out <= 32'b0;
             pc_plus4_out <= 32'b0; imm_out <= 32'b0; rd_addr_out <= 5'b0; instr_out <= 32'h00000013;
             reg_write_out <= 1'b0; mem_read_out <= 1'b0; mem_write_out <= 1'b0;
@@ -201,7 +225,15 @@ module mem_wb_reg (
     output logic [31:0] pend2_data_out
 );
     always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n || clear) begin
+        if (!rst_n) begin
+            alu_result_out <= 32'b0; muldiv_result_out <= 32'b0;
+            pc_plus4_out <= 32'b0; imm_out <= 32'b0; rd_addr_out <= 5'b0; instr_out <= 32'h00000013;
+            reg_write_out <= 1'b0; result_src_out <= 2'b00; is_muldiv_out <= 1'b0;
+            is_csr_out <= 1'b0; csr_addr_out <= 12'b0;
+            is_fisol_bound_out <= 1'b0; is_fisol_off_out <= 1'b0;
+            mem_width_out <= 2'b00; mem_unsigned_out <= 1'b0;
+            pend2_valid_out <= 1'b0; pend2_addr_out <= 5'b0; pend2_data_out <= 32'b0;
+        end else if (clear) begin
             alu_result_out <= 32'b0; muldiv_result_out <= 32'b0;
             pc_plus4_out <= 32'b0; imm_out <= 32'b0; rd_addr_out <= 5'b0; instr_out <= 32'h00000013;
             reg_write_out <= 1'b0; result_src_out <= 2'b00; is_muldiv_out <= 1'b0;

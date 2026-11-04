@@ -11,18 +11,26 @@ PERIOD=${PERIOD:-5.0}          # ns (nangate45 is ns). Pick near your closing pe
 MEM_BYTES=${MEM_BYTES:-1024}   # shrunk memory, same in every config
 JOBS=${JOBS:-2}
 : "${ORFS_FLOW:?run: source all_free_pdks/env.sh}"
-export LEC_CHECK=0 QT_QPA_PLATFORM=offscreen
+export LEC_CHECK=0 QT_QPA_PLATFORM=offscreen SYNTH_HDL_FRONTEND=
 
 OUT=$(pwd)/sweep_out; mkdir -p "$OUT"/cfg
 MEMHEX=$(printf '%X' "$MEM_BYTES")
 
 # name F I B   (D_isol_scope = "1 1 1" per synth_one.tcl in RESULTS.md)
-CONFIGS=("A_baseline 0 0 0" "B_fusion_only 1 0 0" "C_isol_only 0 1 0"
-         "D_proposed 1 1 0" "D_isol_scope_ablation 1 1 1")
+if [ -n "${CONFIGS:-}" ]; then
+  IFS=',' read -ra CONFIGS <<< "$CONFIGS"
+else
+  CONFIGS=("A_baseline 0 0 0" "B_fusion_only 1 0 0" "C_isol_only 0 1 0"
+           "D_proposed 1 1 0" "D_isol_scope_ablation 1 1 1")
+fi
 # NOT true seeds: OpenROAD placement is deterministic. These perturb the
 # physical flow (utilization, placement density addon) to sample P&R variation.
-PERTURBS=("40 0.00" "40 0.05" "42 0.00" "42 0.05" "44 0.00" "44 0.05"
-          "46 0.00" "46 0.05" "38 0.00" "38 0.05")
+if [ -n "${PERTURBS:-}" ]; then
+  IFS=',' read -ra PERTURBS <<< "$PERTURBS"
+else
+  PERTURBS=("40 0.00" "40 0.05" "42 0.00" "42 0.05" "44 0.00" "44 0.05"
+            "46 0.00" "46 0.05" "38 0.00" "38 0.05")
+fi
 
 prep() {  # one source tree per config
   local name=$1 f=$2 i=$3 b=$4 d=$OUT/cfg/$1
