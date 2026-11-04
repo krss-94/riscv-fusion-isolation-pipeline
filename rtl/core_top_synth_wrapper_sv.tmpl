@@ -1,0 +1,57 @@
+module core_top_synth_wrapper (
+    input  logic        clk,
+    input  logic        rst_n,
+
+    output logic [31:0] dbg_wb_pc,
+    output logic [31:0] dbg_wb_instr,
+    output logic        dbg_wb_reg_we,
+    output logic [4:0]  dbg_wb_reg_addr,
+    output logic [31:0] dbg_wb_reg_wdata,
+
+    output logic        dbg_pend2_fire,
+    output logic [4:0]  dbg_pend2_addr,
+    output logic [31:0] dbg_pend2_data,
+
+    output logic [31:0] dbg_mem_pc,
+    output logic [31:0] dbg_mem_instr,
+    output logic        dbg_mem_we,
+    output logic [31:0] dbg_mem_addr,
+    output logic [31:0] dbg_mem_wdata,
+    output logic [1:0]  dbg_mem_width,
+
+    output logic        dbg_trap_taken,
+    output logic [31:0] dbg_mepc,
+    output logic [31:0] dbg_mcause,
+    output logic [31:0] dbg_mtval
+);
+
+    core_top_pipelined #(
+        .MEM_BASE   (32'h8000_0000),
+        .MEM_BYTES  (32'h@MEMHEX@),
+        .FUSION_EN  (@F@),
+        .ISOL_EN    (@I@),
+        .BR_CMP_EN  (@B@)
+    ) u_core (
+        .clk                (clk),
+        .rst_n              (rst_n),
+        .dbg_wb_pc          (dbg_wb_pc),
+        .dbg_wb_instr       (dbg_wb_instr),
+        .dbg_wb_reg_we      (dbg_wb_reg_we),
+        .dbg_wb_reg_addr    (dbg_wb_reg_addr),
+        .dbg_wb_reg_wdata   (dbg_wb_reg_wdata),
+        .dbg_pend2_fire     (dbg_pend2_fire),
+        .dbg_pend2_addr     (dbg_pend2_addr),
+        .dbg_pend2_data     (dbg_pend2_data),
+        .dbg_mem_pc         (dbg_mem_pc),
+        .dbg_mem_instr      (dbg_mem_instr),
+        .dbg_mem_we         (dbg_mem_we),
+        .dbg_mem_addr       (dbg_mem_addr),
+        .dbg_mem_wdata      (dbg_mem_wdata),
+        .dbg_mem_width      (dbg_mem_width),
+        .dbg_trap_taken     (dbg_trap_taken),
+        .dbg_mepc           (dbg_mepc),
+        .dbg_mcause         (dbg_mcause),
+        .dbg_mtval          (dbg_mtval)
+    );
+
+endmodule
