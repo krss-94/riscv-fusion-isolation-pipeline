@@ -1,0 +1,31 @@
+// Reconstructed wrapper: same ports/instance as the one ORFS read before
+// (port list taken from 1_1_yosys_canonicalize.rtlil). Parameters set per config.
+module core_top_synth_wrapper (
+    input  logic        clk,
+    input  logic        rst_n,
+    output logic [31:0] dbg_wb_pc,
+    output logic [31:0] dbg_wb_instr,
+    output logic        dbg_wb_reg_we,
+    output logic [4:0]  dbg_wb_reg_addr,
+    output logic [31:0] dbg_wb_reg_wdata,
+    output logic        dbg_pend2_fire,
+    output logic [4:0]  dbg_pend2_addr,
+    output logic [31:0] dbg_pend2_data,
+    output logic [31:0] dbg_mem_pc,
+    output logic [31:0] dbg_mem_instr,
+    output logic        dbg_mem_we,
+    output logic [31:0] dbg_mem_addr,
+    output logic [31:0] dbg_mem_wdata,
+    output logic [1:0]  dbg_mem_width,
+    output logic        dbg_trap_taken,
+    output logic [31:0] dbg_mepc,
+    output logic [31:0] dbg_mcause,
+    output logic [31:0] dbg_mtval
+);
+    core_top_pipelined #(
+        .MEM_BYTES(32'h@MEMHEX@),
+        .FUSION_EN(1'b@F@),
+        .ISOL_EN  (1'b@I@),
+        .BR_CMP_EN(1'b@B@)
+    ) u_core (.*);
+endmodule

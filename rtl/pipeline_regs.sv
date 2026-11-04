@@ -6,6 +6,7 @@
  * is treated as clear-wins (inserting a bubble is always safe even if a
  * stall was also requested that cycle).
  */
+/* verilator lint_off DECLFILENAME */
 
 module if_id_reg (
     input  logic        clk, rst_n, stall, clear,
@@ -219,3 +220,4 @@ module mem_wb_reg (
         end
     end
 endmodule
+/* verilator lint_on DECLFILENAME */

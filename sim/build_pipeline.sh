@@ -40,14 +40,14 @@ if ! grep -q "^$(printf %s "$SIM_BIN" | sed 's/[.[\*^$]/\\&/g'):" "$OBJ_DIR/$MK"
 fi
 
 echo "==> [4/5] Building with corrected target + lld linker"
-CCACHE_DISABLE=1 make -C "$OBJ_DIR" -f "$MK" "$SIM_BIN" LINK="g++ -fuse-ld=lld"
+CCACHE_DISABLE=1 make -C "$OBJ_DIR" -f "$MK" "$SIM_BIN" LINK="g++"
 
 echo "==> [5/5] Sanity-checking the built binary"
 chmod +x "$SIM_BIN"
 FILE_OUT="$(file "$SIM_BIN")"
 echo "    file: $FILE_OUT"
-if [[ "$FILE_OUT" != *"ELF"* || "$FILE_OUT" != *"executable"* ]]; then
-    echo "!! ERROR: $SIM_BIN not a working ELF." >&2
+if [[ "$FILE_OUT" != *"ELF"* && "$FILE_OUT" != *"Mach-O"* ]] || [[ "$FILE_OUT" != *"executable"* ]]; then
+    echo "!! ERROR: $SIM_BIN not a working executable." >&2
     exit 1
 fi
 echo "==> Build OK: $SIM_BIN"

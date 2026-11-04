@@ -1,19 +1,19 @@
 #!/bin/bash
 set -u
 export TB_TRACE=1
-SPIKE=$HOME/ooo/spike-src/build/spike
-SIM=${1:-${SIM:-$HOME/ooo/sim_pipeline}}
+SPIKE=${SPIKE:-$(which spike)}
+SIM=${1:-${SIM:-sim_pipeline}}
 case "$SIM" in
     /*) ;;
     *) SIM="$PWD/$SIM" ;;
 esac
-GCC=riscv32-unknown-elf-gcc
-OBJCOPY=riscv32-unknown-elf-objcopy
-LD=$HOME/ooo/sw/boot/link_spike.ld
-OUT=${OUT:-$HOME/ooo/harness/out_pipeline}
+GCC=${GCC:-riscv32-unknown-elf-gcc}
+OBJCOPY=${OBJCOPY:-riscv32-unknown-elf-objcopy}
+LD=sw/boot/link_spike.ld
+OUT=${OUT:-harness/out_pipeline}
 mkdir -p "$OUT"
 
-TESTDIRS="$HOME/ooo/sw/test/stage2 $HOME/ooo/sw/test/stage2_random $HOME/ooo/sw/test/stage2_random_cf $HOME/ooo/sw/test/stage5_only"
+TESTDIRS="sw/test/stage2 sw/test/stage2_random sw/test/stage2_random_cf sw/test/stage5_only"
 # Tests that read HPM counters or CSR reset state Spike doesn't model
 # (Part 10 §6 scope boundary) -- excluded from lockstep diff, checked
 # standalone instead via expected register values below.
@@ -42,9 +42,9 @@ for f in $(for d in $TESTDIRS; do ls "$d"/*.s; done); do
     "$SIM" "$bin" $RTL_CYCLES > "$OUT/$name.rtl.raw" 2>/dev/null
     sync
 
-    python3 "$HOME/ooo/harness/spike_normalize.py" "$OUT/$name.spike.raw" | sort > "$OUT/$name.spike.norm"
+    python3 harness/spike_normalize.py "$OUT/$name.spike.raw" | sort > "$OUT/$name.spike.norm"
 
-    python3 "$HOME/ooo/harness/spike_normalize.py" "$OUT/$name.rtl.raw" | sort > "$OUT/$name.rtl.norm"
+    python3 harness/spike_normalize.py "$OUT/$name.rtl.raw" | sort > "$OUT/$name.rtl.norm"
 
     if echo "$STANDALONE_ONLY" | grep -qw "$name"; then
         echo "SKIP-LOCKSTEP (standalone-only, see harness/standalone_checks.sh): $name"

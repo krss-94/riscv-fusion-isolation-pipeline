@@ -10,7 +10,6 @@
 //      program order.
 #include "Vcore_top_pipelined.h"
 #include "Vcore_top_pipelined___024root.h"
-#include "Vcore_top_pipelined_core_top_pipelined.h"
 #include "verilated.h"
 #include "verilated_saif_c.h"
 #include <memory>
@@ -37,8 +36,8 @@ int main(int argc, char** argv) {
         uint32_t w = 0;
         for (int b = 0; b < 4 && i + b < image.size(); b++)
             w |= (uint32_t)image[i + b] << (8 * b);
-        top->rootp->core_top_pipelined->__PVT__imem[i / 4] = w;
-        top->rootp->core_top_pipelined->__PVT__dmem[i / 4] = w;
+        top->rootp->core_top_pipelined__DOT__imem[i / 4] = w;
+        top->rootp->core_top_pipelined__DOT__dmem[i / 4] = w;
     }
 
     std::unique_ptr<VerilatedSaifC> tfp;
@@ -61,6 +60,13 @@ int main(int argc, char** argv) {
 
     long fusion_trace_count = 0;
     long fuse_window_end = -1;
+
+    // --- pend2 episode duration histogram (huffbench/slre root-cause) ---
+    static bool pend2_active_prev = false;
+    static long pend2_active_start_cyc = 0;
+    static long pend2_hist[8] = {0};
+    static long pend2_episodes = 0;
+
     for (long cyc = 0; cyc < max_cycles; cyc++) {
         top->clk = 0; top->eval();  // settle BEFORE the committing edge
         main_time += 5;
@@ -81,14 +87,14 @@ int main(int argc, char** argv) {
         if (top->dbg_mem_we && top->dbg_mem_addr == 0x80000000u)
             fprintf(stderr, "UART: %c", (char)(top->dbg_mem_wdata & 0xff));
         if (tb_trace) {
-            uint32_t mar = top->rootp->core_top_pipelined->__PVT__mem_alu_result;
+            uint32_t mar = top->rootp->core_top_pipelined__DOT__mem_alu_result_fwd;
             if (mar >= 0x80010030u && mar <= 0x80010050u) {
                 fprintf(stderr, "T3 cyc=%3ld mem_alu_result=0x%08x dmem_off=0x%08x mem_we=%d byte_we=%d result_src=%d rdata_raw_d=0x%08x\n",
                     cyc, mar, mar - 0x80000000u,
-                    top->rootp->core_top_pipelined->__PVT__mem_mem_write,
-                    top->rootp->core_top_pipelined->__PVT__dmem_byte_we,
-                    top->rootp->core_top_pipelined->__PVT__mem_result_src,
-                    top->rootp->core_top_pipelined->__PVT__mem_rdata_raw_d);
+                    top->rootp->core_top_pipelined__DOT__u_ex_mem__DOT__mem_write_out,
+                    top->rootp->core_top_pipelined__DOT__dmem_byte_we,
+                    top->rootp->core_top_pipelined__DOT__u_ex_mem__DOT__result_src_out,
+                    top->rootp->core_top_pipelined__DOT__mem_rdata_raw_d);
             }
         }
         if (top->dbg_trap_taken)
@@ -99,14 +105,30 @@ int main(int argc, char** argv) {
         top->clk = 1; top->eval();  // commit
         main_time += 5;
         if (tfp && cyc >= saif_start && (saif_end < 0 || cyc <= saif_end)) tfp->dump(static_cast<uint64_t>(main_time));
-        if (top->rootp->core_top_pipelined->fusion_active && fusion_trace_count < 15) {
+        if (top->rootp->core_top_pipelined__DOT__fusion_active && fusion_trace_count < 15) {
             fuse_window_end = cyc + 6;
             fusion_trace_count++;
         }
+
+        // --- pend2 episode duration histogram (huffbench/slre root-cause) ---
+        bool pend2_now = top->rootp->core_top_pipelined__DOT__pend2_active;
+        if (pend2_now && !pend2_active_prev) {
+            pend2_active_start_cyc = cyc;
+        }
+        if (!pend2_now && pend2_active_prev) {
+            long dur = cyc - pend2_active_start_cyc;
+            if (dur < 0) dur = 0;
+            if (dur > 7) dur = 7;
+            pend2_hist[dur]++;
+            pend2_episodes++;
+        }
+        pend2_active_prev = pend2_now;
     }
 
-    fprintf(stderr, "FINAL pc=0x%08x mcause=0x%08x mepc=0x%08x\n", top->rootp->core_top_pipelined->__PVT__pc, top->dbg_mcause, top->dbg_mepc);
-    fprintf(stderr, "FUSION_ACTIVE_CNT=%u\n", top->rootp->core_top_pipelined->__PVT__u_csr_file__DOT__fusion_active_cnt);
+    fprintf(stderr, "FINAL pc=0x%08x mcause=0x%08x mepc=0x%08x\n", top->dbg_wb_pc, top->dbg_mcause, top->dbg_mepc);
+    fprintf(stderr, "FUSION_ACTIVE_CNT=%u\n", top->rootp->core_top_pipelined__DOT__u_csr_file__DOT__fusion_active_cnt);
+    fprintf(stderr, "PEND2_EPISODES=%ld\n", pend2_episodes);
+    for (int i = 0; i < 8; i++) fprintf(stderr, "PEND2_DUR_%d=%ld\n", i, pend2_hist[i]);
     if (tfp) tfp->close();
     top->final();
     delete top;

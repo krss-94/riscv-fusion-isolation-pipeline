@@ -1,24 +1,32 @@
-*.bak
-*.bak2
-*.bak_*
-obj_dir*/
-sim_pipeline_*
-sim_core
-sim_alu
-sim_decoder
-sim_muldiv*
-sim_regfile
-sim_imm_gen
-sim_hpm_selfcheck
-out_pipeline*/
-*.vcd
-*.fst
-*.saif
+*.swp
+*.swo
+*~
+.DS_Store
 *.log
+*.wlf
+*.vcd
+*.saif
+*.dcp
+*.rpt
+*.jou
+sim_*
+!sim_*.cpp
 *.o
 *.a
-sw/coremark/
-sw/embench-iot/
-*.bak
-*.bak_*
-*.patched
+obj_dir/
+build/
+*.zip
+iic-osic-tools/
+outputs/
+datasets/
+external/
+skills/
+"Progress assessment.md"
+"README (3).md"
+rtl_scan.txt
+files.zip
+"cadence 2/"
+cadence_gpdk045.zip
+"claude files/"
+lint_fixes_package/
+lint_fixes_package.zip

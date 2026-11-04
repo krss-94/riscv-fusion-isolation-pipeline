@@ -45,8 +45,10 @@ module core_top_pipelined #(
 `endif
 
     logic [31:0] pc, pc_next;
+    /* verilator lint_off UNUSEDSIGNAL */
     wire  [31:0] imem_off      = pc - MEM_BASE;
     wire  [31:0] imem_off_next = (pc + 32'd4) - MEM_BASE;
+    /* verilator lint_on UNUSEDSIGNAL */
 
     logic [31:0] pc_d, if_instr_r, if_instr_next_r;
     logic        flush_id;
@@ -218,7 +220,9 @@ module core_top_pipelined #(
 
     logic        stall_idex, flush_ex;
 
-    wire fusion_active /*verilator public*/ = (fuse_idiom1 || fuse_idiom2 || fuse_idiom3 || fuse_idiom4 || fuse_idiom5) && !stall_idex && !flush_ex;
+    /* verilator lint_off UNOPTPUBLIC */
+    wire fusion_active /*verilator public_flat_rw*/ = (fuse_idiom1 || fuse_idiom2 || fuse_idiom3 || fuse_idiom4 || fuse_idiom5) && !stall_idex && !flush_ex;
+    /* verilator lint_on UNOPTPUBLIC */
 
     logic        ex_pend2_valid, mem_pend2_valid, wb_pend2_valid;
     logic [4:0]  ex_pend2_addr, mem_pend2_addr, wb_pend2_addr;
@@ -361,24 +365,18 @@ module core_top_pipelined #(
     wire fuse4_branch_taken = ex_fuse4_bne ? (alu_result != 32'b0) : (alu_result == 32'b0);
 
     logic muldiv_start;
+    /* verilator lint_off UNUSEDSIGNAL */
     logic        wb_is_fisol_bound, wb_is_fisol_off;
-
-    logic isol_en;
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n)
-            isol_en <= 1'b0;
-        else if (wb_is_fisol_bound)
-            isol_en <= 1'b1;
-        else if (wb_is_fisol_off)
-            isol_en <= 1'b0;
-    end
+    /* verilator lint_on UNUSEDSIGNAL */
 
     assign muldiv_start = ex_is_muldiv && !muldiv_busy && !muldiv_done;
 
     wire muldiv_op_en = muldiv_active;
 
     wire br_cmp_op_en = BR_CMP_EN && ex_is_branch;
-    wire isol_active /*verilator public*/ = ISOL_EN && !muldiv_op_en && !br_cmp_op_en;
+    /* verilator lint_off UNOPTPUBLIC */
+    wire isol_active /*verilator public_flat_rw*/ = ISOL_EN && !muldiv_op_en && !br_cmp_op_en;
+    /* verilator lint_on UNOPTPUBLIC */
 
     logic [31:0] muldiv_a_gated, muldiv_b_gated;
     isol_gate u_isol_gate_a (.clk(clk), .en(!ISOL_EN || muldiv_op_en), .d(fwd_a_val), .q(muldiv_a_gated));
@@ -515,10 +513,14 @@ module core_top_pipelined #(
         endcase
     end
 
+    /* verilator lint_off UNUSEDSIGNAL */
     logic [31:0] mem_rdata_raw;
+    /* verilator lint_on UNUSEDSIGNAL */
     logic [31:0] mem_rdata_raw_d;
     localparam logic [31:0] UART_TXDATA_ADDR = 32'h8000_0000;
+    /* verilator lint_off UNUSEDSIGNAL */
     wire  [31:0] dmem_off = mem_alu_result - MEM_BASE;
+    /* verilator lint_on UNUSEDSIGNAL */
     wire  is_uart_txdata = (mem_alu_result == UART_TXDATA_ADDR);
     logic [1:0] dmem_byte_sel_d;
     always_ff @(posedge clk) begin

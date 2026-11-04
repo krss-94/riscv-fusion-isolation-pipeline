@@ -13,9 +13,11 @@ module muldiv (
     wire        [32:0] a_u = {1'b0, a};
     wire        [32:0] b_u = {1'b0, b};
 
+    /* verilator lint_off UNUSEDSIGNAL */
     wire signed [65:0] prod_ss = a_s * b_s;
     wire signed [65:0] prod_su = a_s * $signed({1'b0, b});
     wire        [65:0] prod_uu = a_u * b_u;
+    /* verilator lint_on UNUSEDSIGNAL */
 
     logic signed [31:0] div_s, rem_s;
     logic        [31:0] div_u, rem_u;

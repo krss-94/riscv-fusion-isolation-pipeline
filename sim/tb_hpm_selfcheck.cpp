@@ -9,7 +9,6 @@
 // before the next read).
 #include "Vcore_top_pipelined.h"
 #include "Vcore_top_pipelined___024root.h"
-#include "Vcore_top_pipelined_core_top_pipelined.h"
 #include "verilated.h"
 #include <cstdio>
 #include <cstdlib>
@@ -24,36 +23,36 @@ int main(int argc, char** argv) {
     if (!f) { fprintf(stderr, "cannot open %s\n", argv[1]); return 1; }
     std::vector<uint8_t> image((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     for (size_t i = 0; i < image.size(); i++)
-        top->rootp->core_top_pipelined->__PVT__mem[i] = image[i];
+        top->rootp->__PVT__mem[i] = image[i];
     long max_cycles = atol(argv[2]);
     top->rst_n = 0; top->clk = 0;
     top->eval();
     top->clk = 1; top->eval();
     top->rst_n = 1;
 
-    uint32_t shadow_fusion = top->rootp->core_top_pipelined->__PVT__u_csr_file__DOT__fusion_active_cnt;
-    uint32_t shadow_isol   = top->rootp->core_top_pipelined->__PVT__u_csr_file__DOT__isol_active_cnt;
-    uint32_t shadow_muldiv = top->rootp->core_top_pipelined->__PVT__u_csr_file__DOT__muldiv_active_cnt;
+    uint32_t shadow_fusion = top->rootp->core_top_pipelined__DOT__u_csr_file__DOT__fusion_active_cnt;
+    uint32_t shadow_isol   = top->rootp->__PVT__u_csr_file__DOT__isol_active_cnt;
+    uint32_t shadow_muldiv = top->rootp->__PVT__u_csr_file__DOT__muldiv_active_cnt;
     int mismatches = 0;
 
     for (long cyc = 0; cyc < max_cycles; cyc++) {
         top->clk = 0; top->eval();
 
-        if (top->rootp->core_top_pipelined->fusion_active) shadow_fusion++;
-        if (top->rootp->core_top_pipelined->isol_active)   shadow_isol++;
-        if (top->rootp->core_top_pipelined->__PVT__muldiv_start)  shadow_muldiv++;
+        if (top->rootp->core_top_pipelined__DOT__fusion_active) shadow_fusion++;
+        if (top->rootp->core_top_pipelined__DOT__isol_active)   shadow_isol++;
+        if (top->rootp->__PVT__muldiv_start)  shadow_muldiv++;
 
-        uint32_t rtl_fusion = top->rootp->core_top_pipelined->__PVT__u_csr_file__DOT__fusion_active_cnt;
-        uint32_t rtl_isol   = top->rootp->core_top_pipelined->__PVT__u_csr_file__DOT__isol_active_cnt;
-        uint32_t rtl_muldiv = top->rootp->core_top_pipelined->__PVT__u_csr_file__DOT__muldiv_active_cnt;
+        uint32_t rtl_fusion = top->rootp->core_top_pipelined__DOT__u_csr_file__DOT__fusion_active_cnt;
+        uint32_t rtl_isol   = top->rootp->__PVT__u_csr_file__DOT__isol_active_cnt;
+        uint32_t rtl_muldiv = top->rootp->__PVT__u_csr_file__DOT__muldiv_active_cnt;
 
         top->clk = 1; top->eval();  // commit -- counters update on this edge
 
         // After the edge, RTL counters reflect this cycle's pulses too;
         // compare post-edge RTL value against post-increment shadow.
-        uint32_t rtl_fusion2 = top->rootp->core_top_pipelined->__PVT__u_csr_file__DOT__fusion_active_cnt;
-        uint32_t rtl_isol2   = top->rootp->core_top_pipelined->__PVT__u_csr_file__DOT__isol_active_cnt;
-        uint32_t rtl_muldiv2 = top->rootp->core_top_pipelined->__PVT__u_csr_file__DOT__muldiv_active_cnt;
+        uint32_t rtl_fusion2 = top->rootp->core_top_pipelined__DOT__u_csr_file__DOT__fusion_active_cnt;
+        uint32_t rtl_isol2   = top->rootp->__PVT__u_csr_file__DOT__isol_active_cnt;
+        uint32_t rtl_muldiv2 = top->rootp->__PVT__u_csr_file__DOT__muldiv_active_cnt;
         (void)rtl_fusion; (void)rtl_isol; (void)rtl_muldiv;
 
         if (rtl_fusion2 != shadow_fusion) {

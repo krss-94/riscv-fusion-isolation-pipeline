@@ -1,7 +1,7 @@
 #!/bin/bash
 set -u
-SIM=${SIM:-$HOME/ooo/sim_pipeline}
-OUT=${OUT:-$HOME/ooo/harness/out_pipeline}
+SIM=${SIM:-sim_pipeline}
+OUT=${OUT:-harness/out_pipeline}
 PASS=0; FAIL=0
 
 getreg() {

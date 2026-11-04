@@ -32,12 +32,14 @@ module core_top #(
     logic [31:0] imm;
     logic [31:0] alu_a, alu_b, alu_result, muldiv_result;
     logic [31:0] mem_rdata_raw, mem_rdata;
+    /* verilator lint_off UNUSEDSIGNAL */
     logic [31:0] dbg_mem_wdata_r;
     logic        reg_write, mem_read, mem_write, mem_unsigned, is_muldiv;
     logic        alu_src_a_pc, alu_src_b_imm, is_branch, is_jal, is_jalr;
     logic        is_fisol_bound, is_fisol_off, illegal_instr, is_csr;
     logic [1:0]  csr_op;
     logic [11:0] csr_addr;
+    /* verilator lint_on UNUSEDSIGNAL */
     logic [1:0]  mem_width, result_src;
     logic [3:0]  alu_op;
     logic [2:0]  muldiv_op;

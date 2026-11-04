@@ -4,6 +4,7 @@
  * default case, rather than anything meaningful. Fine as long as directed/
  * random RV32IM test programs don't contain them, which they won't by
  * construction at this stage. */
+/* verilator lint_off UNUSEDSIGNAL */
 module decoder (
     input  logic [31:0] instr,
     output logic        reg_write,
@@ -124,3 +125,4 @@ module decoder (
         endcase
     end
 endmodule
+/* verilator lint_on UNUSEDSIGNAL */
